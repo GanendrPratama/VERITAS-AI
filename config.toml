@@ -1,0 +1,30 @@
+# See docs/veritas-ai-design.md, Section 7, for what each key means.
+
+model = "qwen2.5:7b-instruct-q4_K_M"
+stt_model = "small"
+max_questions = 25
+max_minutes = 30
+high_bound = 0.35
+stable_turns = 2
+w_flag = 0.20
+w_clear = 0.10
+arousal_elevated_sd = 1.0
+arousal_high_sd = 2.0
+stt_min_logprob = -1.0
+sensor_dropout_sec = 3
+calibration_minutes = 3
+
+llm_keep_alive = "30m"
+llm_max_tokens = 256
+llm_context_turns = 6
+stt_device = "cuda"
+ollama_host = "http://localhost:11434"
+
+vision_device = "cuda"
+camera_index = 0
+mic_samplerate = 16000
+
+ble_device_name = "VERITAS-SENSOR"
+ble_hr_service_uuid = "180D"
+ble_hr_char_uuid = "2A37"
+ble_gsr_char_uuid = "6b3a2c00-1e3d-4f6a-9c1e-2a1a2f3b4c5d"

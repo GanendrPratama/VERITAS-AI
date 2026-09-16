@@ -1,0 +1,8 @@
+streamlit
+requests
+pypdf
+faster-whisper
+bleak
+sounddevice
+opencv-python-headless
+py-feat
