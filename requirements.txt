@@ -1,6 +1,7 @@
 streamlit
 requests
 pypdf
+markitdown[pdf]
 faster-whisper
 bleak
 sounddevice

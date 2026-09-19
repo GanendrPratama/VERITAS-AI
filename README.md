@@ -66,8 +66,77 @@ BLE (`services/sensors.py`) + webcam (`services/vision.py`) capture. Any
 missing piece — no Ollama, no mic, no ESP32, no camera — degrades to
 "unavailable" for that channel rather than crashing (design doc Section 4).
 
-Not built: the ESP32 firmware itself (Section 9, Open decision #8) — only
-the BLE profile `services/sensors.py` expects.
+ESP32 firmware: `esp32/VERITAS/` (Section 9, Open decision #8) — implements
+the BLE profile `services/sensors.py` expects, but untested on real hardware
+from this machine.
+
+## ESP32 sensor node
+
+`esp32/VERITAS/` (PlatformIO project, `src/main.cpp`) — BLE GATT server
+publishing heart rate and GSR, built against the same board this project
+assumed from the start (Section 1: RTX 4050 laptop, GPU-bound; the sensor
+node is a separate cheap microcontroller, not the laptop).
+
+**Hardware**
+
+| Part | Notes |
+|---|---|
+| Board | Any ESP32 dev board (dual-core, BLE 4.2+) |
+| Heart rate | MAX30102 pulse oximeter breakout, I2C |
+| GSR | Resistive GSR sensor module with analog output |
+
+**Wiring**
+
+| Signal | ESP32 pin |
+|---|---|
+| MAX30102 SDA | GPIO21 |
+| MAX30102 SCL | GPIO22 |
+| MAX30102 VIN | 3.3V |
+| MAX30102 GND | GND |
+| GSR sensor OUT | GPIO34 (ADC1, input-only) |
+
+**BLE profile** (must match `config.toml`'s `ble_*` keys — `services/sensors.py`
+connects by device name and reads by characteristic UUID):
+
+| Key | Value | Notes |
+|---|---|---|
+| Device name | `VERITAS-SENSOR` | |
+| Heart Rate service | `0x180D` | standard BLE SIG service |
+| Heart Rate characteristic | `0x2A37` | standard BLE SIG char, notify, uint8 format (flags byte `0x00` + BPM) |
+| GSR service | `bfe582f0-d884-43d4-aa9d-7648f8536e40` | custom — no BLE SIG service fits GSR |
+| GSR characteristic | `6b3a2c00-1e3d-4f6a-9c1e-2a1a2f3b4c5d` | custom, notify, raw 12-bit ADC as uint16 little-endian |
+
+**Firmware architecture** — two FreeRTOS tasks joined by a queue, not one
+`loop()` doing both jobs:
+
+- `SensorTask` (core 1) — polls the MAX30102 every ~2ms (beat detection
+  needs frequent sampling) and GSR every 200ms, pushes each new reading onto
+  `sampleQueue`. Never touches BLE.
+- `BLETask` (core 0) — blocks on `sampleQueue`, calls `notify()` the moment
+  a reading arrives. Never touches sensor hardware.
+
+Splitting sensing from BLE I/O onto separate cores means a slow BLE stack
+call can't stall sensor polling, and vice versa — the two tasks only
+communicate through the queue, never shared state.
+
+**Flashing** — a [PlatformIO](https://platformio.org) project
+(`esp32/VERITAS/`), not an Arduino IDE sketch: `platformio.ini` pins the
+board (`esp32doit-devkit-v1` — change this line if yours differs) and
+declares the SparkFun MAX3010x library in `lib_deps`, so PlatformIO fetches
+it and the ESP32 toolchain itself, no manual Library/Boards Manager steps.
+
+```bash
+cd esp32/VERITAS
+pio run -t upload     # build + flash
+pio device monitor    # serial log at 115200 baud
+```
+
+(VS Code + the PlatformIO IDE extension works the same way — open
+`esp32/VERITAS/` as the project folder and use its Upload/Monitor buttons.)
+
+Untested on real hardware from this machine (no ESP32/MAX30102/GSR sensor
+here) — in particular, verify the `irValue > 50000` finger-presence
+threshold in `sensorTask` against your actual sensor.
 
 ## Tests
 
@@ -82,4 +151,5 @@ python services/llm.py
 python services/stt.py
 python services/sensors.py
 python services/vision.py               # baseline/delta math only, no camera needed
+python services/docconvert.py           # PDF->Markdown, falls back to pypdf if markitdown is missing
 ```

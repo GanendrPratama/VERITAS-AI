@@ -19,7 +19,6 @@ are all best-effort: if a service can't be reached or a library isn't
 installed, that channel's data just stays unavailable rather than crashing
 the interview (Section 4: degrade, never crash).
 """
-import io
 import json
 import re
 import threading
@@ -29,11 +28,10 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from pypdf import PdfReader
-
 import fusion
 import stoplogic
 from services import llm, stt
+from services.docconvert import pdf_to_markdown
 
 ROOT = Path(__file__).resolve().parent
 LOGS_DIR = ROOT / "logs"
@@ -160,8 +158,7 @@ class Orchestrator:
     def create_session(self, pdf_bytes):
         with self.lock:
             try:
-                reader = PdfReader(io.BytesIO(pdf_bytes))
-                report_text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+                report_text = pdf_to_markdown(pdf_bytes)
             except Exception as e:
                 raise OrchestratorError(f"couldn't read PDF: {e}", status=400)
             self.active = new_session_state(self._new_session_id(), report_text)

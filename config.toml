@@ -27,4 +27,5 @@ mic_samplerate = 16000
 ble_device_name = "VERITAS-SENSOR"
 ble_hr_service_uuid = "180D"
 ble_hr_char_uuid = "2A37"
+ble_gsr_service_uuid = "bfe582f0-d884-43d4-aa9d-7648f8536e40"
 ble_gsr_char_uuid = "6b3a2c00-1e3d-4f6a-9c1e-2a1a2f3b4c5d"
