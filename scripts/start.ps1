@@ -32,6 +32,24 @@ Start-Process -FilePath $streamlit -ArgumentList @("run", "ui/app.py", "--server
     -RedirectStandardOutput "logs\dashboard.log" `
     -RedirectStandardError "logs\dashboard.err.log"
 
+function Wait-ForPort($name, $port, $errLog, $timeoutSec = 30) {
+    Write-Host -NoNewline "waiting for $name on port $port "
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-NetConnection -ComputerName localhost -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue) {
+            Write-Host " up"
+            return
+        }
+        Write-Host -NoNewline "."
+        Start-Sleep -Seconds 1
+    }
+    Write-Host " timed out"
+    Write-Host "$name didn't come up in ${timeoutSec}s -- check $errLog"
+}
+
+Wait-ForPort "orchestrator" 8000 "logs\orchestrator.err.log"
+Wait-ForPort "dashboard" 8501 "logs\dashboard.err.log"
+
 Write-Host "orchestrator: http://localhost:8000  (log: logs\orchestrator.log)"
 Write-Host "dashboard:    http://localhost:8501  (log: logs\dashboard.log)"
 Write-Host "stop with:    see README.md"
