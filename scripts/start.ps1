@@ -14,6 +14,9 @@ $streamlit = Join-Path $root "$venv\Scripts\streamlit.exe"
 if (-not (Test-Path $python)) {
     throw "Python venv not found at $python -- create it first (python -m venv $venv) or set `$env:VENV"
 }
+if (-not (Test-Path $streamlit)) {
+    throw "streamlit not found at $streamlit -- install requirements first (pip install -r requirements.txt)"
+}
 
 New-Item -ItemType Directory -Force -Path "logs" | Out-Null
 
