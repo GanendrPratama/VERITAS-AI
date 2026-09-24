@@ -6,8 +6,14 @@ Set-Location -Path (Split-Path -Parent $PSScriptRoot)
 $root = (Get-Location).Path  # Start-Process ignores PowerShell's cwd for relative paths -- pin it explicitly
 
 $venv = if ($env:VENV) { $env:VENV } else { "venv" }
-$python = Join-Path $venv "Scripts\python.exe"
-$streamlit = Join-Path $venv "Scripts\streamlit.exe"
+# Start-Process -FilePath does not reliably resolve relative paths against the
+# shell's cwd, so build absolute paths off $root instead.
+$python = Join-Path $root "$venv\Scripts\python.exe"
+$streamlit = Join-Path $root "$venv\Scripts\streamlit.exe"
+
+if (-not (Test-Path $python)) {
+    throw "Python venv not found at $python -- create it first (python -m venv $venv) or set `$env:VENV"
+}
 
 New-Item -ItemType Directory -Force -Path "logs" | Out-Null
 
