@@ -74,6 +74,9 @@ def main():
             status, state = call(port, "GET", "/state")
             assert status == 200 and state == {"active": False}, state
 
+            status, health = call(port, "GET", "/health")
+            assert status == 200 and {h["status"] for h in health} <= {"ok", "idle", "down"} and len(health) == 5, health
+
             status, _ = call(port, "POST", "/record/start")
             assert status == 409, "should refuse actions before any session exists"
 

@@ -197,6 +197,58 @@ class Orchestrator:
                 return {"active": False}
             return dict(self.active)
 
+    # -- component health (for the UI status panel) --
+
+    def health(self):
+        import importlib.util
+
+        def lib(name):
+            return importlib.util.find_spec(name) is not None
+
+        with self.lock:
+            live = self.active is not None and self.active["phase"] != "idle"
+        drop = self.config["sensor_dropout_sec"]
+
+        def stream(svc, missing, idle, extra=None):
+            if isinstance(svc, _NullHardwareService):
+                return "down", missing
+            if not live:
+                return "idle", idle
+            if extra == "no_ble":
+                return "down", f"{self.config['ble_device_name']} not found over BLE"
+            samples = getattr(svc, "samples", [])
+            if not samples:
+                return "down", "no data received yet"
+            age = time.time() - samples[-1][0]
+            return ("ok", "streaming") if age <= drop else ("down", f"no data for {age:.0f}s")
+
+        ble_ok = getattr(self.sensors, "is_connected", lambda: True)()
+        esp = stream(self.sensors, "bleak not installed", "connects when calibration starts",
+                     None if ble_ok else "no_ble")
+        cam = stream(self.vision, "py-feat / opencv not installed", "starts with calibration")
+
+        try:
+            import sounddevice as sd
+
+            mic = ("ok", sd.query_devices(kind="input")["name"])
+        except Exception as e:
+            mic = ("down", f"no input device ({e})")
+
+        try:
+            import requests
+
+            requests.get(f"{self.config['ollama_host']}/api/tags", timeout=1).raise_for_status()
+            llm_ = ("ok", self.config["model"])
+        except Exception:
+            llm_ = ("down", f"Ollama unreachable at {self.config['ollama_host']}")
+
+        stt_ = ("ok", self.config["stt_model"]) if lib("faster_whisper") else ("down", "faster-whisper not installed")
+        return [
+            {"name": n, "status": st, "detail": d}
+            for n, (st, d) in [("ESP32 sensor (HR/GSR)", esp), ("Camera / face", cam),
+                               ("Microphone", mic), ("Speech-to-text", stt_), ("LLM (Ollama)", llm_)]
+        ]
+
     # -- claims --
 
     def add_claims(self, texts):
@@ -418,6 +470,8 @@ def make_handler(orch):
         def do_GET(self):
             if self.path == "/state":
                 self._send_json(200, orch.get_state())
+            elif self.path == "/health":
+                self._send_json(200, orch.health())
             elif self.path == "/sessions":
                 self._send_json(200, orch.list_sessions())
             else:

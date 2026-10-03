@@ -41,6 +41,20 @@ Open http://localhost:8501 in a browser. Start with a new session (upload the
 subject's report as a PDF), type in the claims to track, then work through
 the turn loop with the on-screen buttons.
 
+### Dashboard
+
+The UI follows the SlideFlow mockup (dark theme, 4-step tracker in the
+sidebar: Document → Claims → Interview → Results). The mockup itself
+(`VERITAS-AI_Dashboard_SlideFlow.html`) is a local design reference and is
+gitignored.
+
+**Component Status** (sidebar, refreshes every 3s) shows whether the ESP32
+sensor, camera, microphone, speech-to-text and Ollama are detected, with the
+reason when not (e.g. "VERITAS-SENSOR not found over BLE"). A red
+"Not detected: …" banner repeats any `down` component on every screen. The
+ESP32 and camera only start at calibration, so they show `idle` until then.
+The data comes from the orchestrator's `GET /health`.
+
 The dashboard and orchestrator are separate processes that only talk over
 that local HTTP API — either can be restarted without killing the other.
 
