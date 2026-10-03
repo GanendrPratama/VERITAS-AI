@@ -249,6 +249,15 @@ class Orchestrator:
                                ("Microphone", mic), ("Speech-to-text", stt_), ("LLM (Ollama)", llm_)]
         ]
 
+    def tail_logs(self, lines=200):
+        out = []
+        for name in ("orchestrator.log", "orchestrator.err.log"):
+            path = self.logs_dir / name
+            if path.is_file():
+                out.append(f"== {name} ==")
+                out += path.read_text(errors="replace").splitlines()[-lines:]
+        return {"text": "\n".join(out) or "(no log output yet)"}
+
     # -- claims --
 
     def add_claims(self, texts):
@@ -472,6 +481,8 @@ def make_handler(orch):
                 self._send_json(200, orch.get_state())
             elif self.path == "/health":
                 self._send_json(200, orch.health())
+            elif self.path == "/logs":
+                self._send_json(200, orch.tail_logs())
             elif self.path == "/sessions":
                 self._send_json(200, orch.list_sessions())
             else:

@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 VENV="${VENV:-venv}"
 mkdir -p logs
 
-nohup "$VENV/bin/python" orchestrator.py > logs/orchestrator.log 2>&1 &
+nohup "$VENV/bin/python" -u orchestrator.py > logs/orchestrator.log 2>&1 &
 disown
 nohup "$VENV/bin/streamlit" run ui/app.py --server.port 8501 --server.headless true > logs/dashboard.log 2>&1 &
 disown

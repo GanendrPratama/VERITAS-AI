@@ -208,6 +208,17 @@ def alert_banner():
                     unsafe_allow_html=True)
 
 
+@st.fragment(run_every="2s")
+def log_body():
+    data = get("/logs")
+    st.code(data["text"] if data else "Orchestrator unreachable.", language="log", height=300)
+
+
+def log_viewer():
+    with st.expander("Logs (orchestrator, live)"):
+        log_body()
+
+
 def results_step(state):
     st.markdown('<div class="kicker">Stage 04 / Output</div>', unsafe_allow_html=True)
     st.title("Interview Results")
@@ -235,3 +246,4 @@ elif state and state.get("session_id") and not st.session_state.get("force_landi
 else:
     st.session_state["force_landing"] = False
     landing_screen()
+log_viewer()

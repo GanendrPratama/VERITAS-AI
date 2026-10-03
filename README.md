@@ -55,6 +55,10 @@ reason when not (e.g. "VERITAS-SENSOR not found over BLE"). A red
 ESP32 and camera only start at calibration, so they show `idle` until then.
 The data comes from the orchestrator's `GET /health`.
 
+The **Logs** expander at the bottom of every screen live-tails the
+orchestrator log (`GET /logs`, last 200 lines of `logs/orchestrator.log`
+plus `.err.log` on Windows).
+
 The dashboard and orchestrator are separate processes that only talk over
 that local HTTP API — either can be restarted without killing the other.
 

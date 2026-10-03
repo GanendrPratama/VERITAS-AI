@@ -20,7 +20,7 @@ if (-not (Test-Path $streamlit)) {
 
 New-Item -ItemType Directory -Force -Path "logs" | Out-Null
 
-Start-Process -FilePath $python -ArgumentList "orchestrator.py" `
+Start-Process -FilePath $python -ArgumentList @("-u", "orchestrator.py") `
     -WorkingDirectory $root `
     -WindowStyle Hidden `
     -RedirectStandardOutput "logs\orchestrator.log" `
