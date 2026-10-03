@@ -209,14 +209,16 @@ def alert_banner():
 
 
 @st.fragment(run_every="2s")
-def log_body():
-    data = get("/logs")
+def log_body(which):
+    data = get(f"/logs/{which}")
     st.code(data["text"] if data else "Orchestrator unreachable.", language="log", height=300)
 
 
 def log_viewer():
-    with st.expander("Logs (orchestrator, live)"):
-        log_body()
+    with st.expander("Logs (live)"):
+        for tab, which in zip(st.tabs(["Orchestrator", "Dashboard"]), ["orchestrator", "dashboard"]):
+            with tab:
+                log_body(which)
 
 
 def results_step(state):

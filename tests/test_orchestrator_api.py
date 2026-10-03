@@ -79,6 +79,8 @@ def main():
 
             status, logs = call(port, "GET", "/logs")
             assert status == 200 and "text" in logs, logs
+            assert call(port, "GET", "/logs/dashboard")[0] == 200
+            assert call(port, "GET", "/logs/nope")[0] == 404
 
             status, _ = call(port, "POST", "/record/start")
             assert status == 409, "should refuse actions before any session exists"

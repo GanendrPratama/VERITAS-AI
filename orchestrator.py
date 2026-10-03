@@ -249,9 +249,11 @@ class Orchestrator:
                                ("Microphone", mic), ("Speech-to-text", stt_), ("LLM (Ollama)", llm_)]
         ]
 
-    def tail_logs(self, lines=200):
+    def tail_logs(self, which="orchestrator", lines=200):
+        if which not in ("orchestrator", "dashboard"):
+            raise OrchestratorError(f"unknown log: {which}", status=404)
         out = []
-        for name in ("orchestrator.log", "orchestrator.err.log"):
+        for name in (f"{which}.log", f"{which}.err.log"):
             path = self.logs_dir / name
             if path.is_file():
                 out.append(f"== {name} ==")
@@ -481,8 +483,11 @@ def make_handler(orch):
                 self._send_json(200, orch.get_state())
             elif self.path == "/health":
                 self._send_json(200, orch.health())
-            elif self.path == "/logs":
-                self._send_json(200, orch.tail_logs())
+            elif self.path.startswith("/logs"):
+                try:
+                    self._send_json(200, orch.tail_logs(self.path[len("/logs/"):] or "orchestrator"))
+                except OrchestratorError as e:
+                    self._send_json(e.status, {"error": str(e)})
             elif self.path == "/sessions":
                 self._send_json(200, orch.list_sessions())
             else:
