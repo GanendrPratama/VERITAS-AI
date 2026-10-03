@@ -57,6 +57,7 @@ class SensorService:
         self._loop = None
         self._client = None
         self._connected = threading.Event()
+        self.error = None  # last failure reason, shown in the UI status panel
 
     def start(self):
         # Non-blocking: BLE scan/connect can take seconds, and calibrate_start
@@ -80,6 +81,7 @@ class SensorService:
         try:
             device = await BleakScanner.find_device_by_name(self.device_name, timeout=10)
             if device is None:
+                self.error = f"BLE scan (10s) found no device named {self.device_name!r}"
                 return
             async with BleakClient(device) as client:
                 self._client = client
@@ -88,8 +90,8 @@ class SensorService:
                 await client.start_notify(self.gsr_char_uuid, self._on_gsr)
                 while client.is_connected:
                     await asyncio.sleep(0.5)
-        except Exception:
-            pass  # degrade gracefully -- channel just stays unavailable
+        except Exception as e:
+            self.error = f"{type(e).__name__}: {e}"  # degrade gracefully -- channel just stays unavailable
 
     async def _disconnect(self):
         if self._client:

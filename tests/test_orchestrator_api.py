@@ -146,6 +146,24 @@ def main():
             status, sessions = call(port, "GET", "/sessions")
             assert session_a_id not in {s["session_id"] for s in sessions}, "stopped session shouldn't be listed"
 
+            # No mic/STT: stop is refused (still recording), then a typed answer completes the turn.
+            call(port, "POST", "/sessions", make_test_pdf())
+            call(port, "POST", "/claims", ["was at home at 10pm"])
+            call(port, "POST", "/calibrate/start")
+            call(port, "POST", "/calibrate/stop")
+            call(port, "POST", "/generate-question")
+            call(port, "POST", "/record/start")
+
+            def no_mic(self, wav_path):
+                raise orchestrator.OrchestratorError("no audio captured")
+
+            orchestrator.Orchestrator._capture_answer = no_mic
+            status, _ = call(port, "POST", "/record/stop")
+            assert status == 409, "no audio and no typed answer should be refused"
+            status, state = call(port, "POST", "/record/stop", b"saya di rumah")
+            assert status == 200 and state["recording"] is False, state
+            assert state["transcript"][-1]["answer"] == "saya di rumah", state["transcript"]
+
             print("test_orchestrator_api.py passed")
         finally:
             server.shutdown()

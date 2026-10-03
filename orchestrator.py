@@ -214,6 +214,8 @@ class Orchestrator:
                 return "down", missing
             if not live:
                 return "idle", idle
+            if getattr(svc, "error", None):
+                return "down", svc.error
             if extra == "no_ble":
                 return "down", f"{self.config['ble_device_name']} not found over BLE"
             samples = getattr(svc, "samples", [])
@@ -317,17 +319,26 @@ class Orchestrator:
             self.active["record_start_ts"] = time.time()
             self._save()
 
-    def record_stop(self):
+    def record_stop(self, typed_answer=None):
+        """typed_answer: operator-typed text used instead of mic+STT (partial setups)."""
         with self.lock:
             self._require_active()
             if not self.active["recording"]:
                 raise OrchestratorError("not recording")
-            self.active["recording"] = False
             record_start_ts = self.active["record_start_ts"]
             record_end_ts = time.time()
 
             wav_path = self._session_path(self.active["session_id"]).parent / f"turn_{self.active['question_count']}.wav"
-            answer_text, unclear = self._capture_answer(wav_path)
+            if typed_answer:
+                try:
+                    self.recorder.stop(str(wav_path))  # release the mic if it did start
+                except Exception:
+                    pass
+                answer_text, unclear = typed_answer, False
+            else:
+                # raises (staying in "recording") if there's no audio, so the operator can retry typed
+                answer_text, unclear = self._capture_answer(wav_path)
+            self.active["recording"] = False
 
             if self.active["phase"] == "interview":
                 self._assess_answer(answer_text, unclear, record_start_ts, record_end_ts)
@@ -338,13 +349,13 @@ class Orchestrator:
             self.recorder.stop(str(wav_path))
         except Exception as e:
             print(f"[orchestrator] mic recording unavailable: {e}")
-            return "", True
+            raise OrchestratorError("no audio captured (mic unavailable) -- type the answer and press Stop again")
         try:
             result = stt.transcribe(self._whisper(), str(wav_path), self.config["stt_min_logprob"])
             return result["text"], result["unclear"]
         except Exception as e:
             print(f"[orchestrator] STT failed: {e}")
-            return "", True
+            raise OrchestratorError("speech-to-text unavailable -- type the answer and press Stop again")
 
     def _assess_answer(self, answer_text, unclear, start_ts, end_ts):
         deltas = {}
@@ -456,7 +467,6 @@ SIMPLE_ROUTES = {
     "/calibrate/start": Orchestrator.calibrate_start,
     "/calibrate/stop": Orchestrator.calibrate_stop,
     "/record/start": Orchestrator.record_start,
-    "/record/stop": Orchestrator.record_stop,
     "/generate-question": Orchestrator.generate_question,
     "/stop-interview": Orchestrator.stop_interview,
 }
@@ -511,6 +521,11 @@ def make_handler(orch):
                         self._send_json(400, {"error": "expected a JSON list of claim strings"})
                         return
                     self._send_json(200, orch.add_claims(texts))
+                    return
+
+                if self.path == "/record/stop":
+                    orch.record_stop(self._read_body().decode("utf-8").strip() or None)
+                    self._send_json(200, orch.get_state())
                     return
 
                 match = OPEN_SESSION_RE.match(self.path)

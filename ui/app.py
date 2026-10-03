@@ -129,21 +129,20 @@ def control_panel(state):
         if st.button("Switch Session"):
             st.session_state["force_landing"] = True
             st.rerun()
-        if st.button("Finish Calibration"):
-            post("/calibrate/stop")
-            st.rerun()
-        if st.button("Record"):
-            post("/record/start")
-            st.rerun()
-        if st.button("Stop"):
-            post("/record/stop")
-            st.rerun()
-        if st.button("Generate Question"):
-            post("/generate-question")
-            st.rerun()
-        if st.button("Stop Interview", type="primary"):
-            post("/stop-interview")
-            st.rerun()
+        for label, path, kind in [
+            ("Finish Calibration", "/calibrate/stop", "secondary"),
+            ("Record", "/record/start", "secondary"),
+            ("Generate Question", "/generate-question", "secondary"),
+            ("Stop Interview", "/stop-interview", "primary"),
+        ]:
+            if label == "Generate Question":
+                typed = st.text_area("Typed answer (only if mic/STT unavailable)", key="typed_answer")
+                if st.button("Stop", key="stop_rec") and post("/record/stop", data=typed.encode("utf-8")) is not None:
+                    st.session_state["typed_answer"] = ""
+                    st.rerun()
+            # Rerun only on success -- a rerun would wipe the error post() just showed.
+            if st.button(label, type=kind) and post(path) is not None:
+                st.rerun()
 
     @st.fragment(run_every="1s")
     def live_state():

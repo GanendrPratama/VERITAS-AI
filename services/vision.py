@@ -67,6 +67,7 @@ class VisionService:
         self.camera_index = camera_index
         self.requested_device = device
         self.device_used = None
+        self.error = None  # last failure reason, shown in the UI status panel
         self.samples = []  # [(timestamp, channel, value)]
         self.baseline = {}
         self._lock = threading.Lock()
@@ -82,10 +83,13 @@ class VisionService:
     def _run(self):
         try:
             detector, self.device_used = load_detector(self.requested_device)
-        except Exception:
+        except Exception as e:
+            self.error = f"face detector failed to load: {type(e).__name__}: {e}"
             return  # no vision this session -- channels stay unavailable
 
         cap = cv2.VideoCapture(self.camera_index)
+        if not cap.isOpened():
+            self.error = f"camera index {self.camera_index} won't open"
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 frame_path = str(Path(tmp) / "frame.jpg")
