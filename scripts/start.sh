@@ -13,4 +13,4 @@ disown
 
 echo "orchestrator: http://localhost:8000  (log: logs/orchestrator.log)"
 echo "dashboard:    http://localhost:8501  (log: logs/dashboard.log)"
-echo "stop with:    pkill -f orchestrator.py; pkill -f 'streamlit run'"
+echo "stop with:    scripts/stop.sh"

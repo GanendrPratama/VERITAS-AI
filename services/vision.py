@@ -91,15 +91,25 @@ class VisionService:
         self.baseline = {}
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._thread = None
+
+    def is_running(self):
+        return self._thread is not None and self._thread.is_alive()
 
     def start(self):
-        self._stop_event.clear()
-        threading.Thread(target=self._run, daemon=True).start()
+        if self.is_running():
+            return  # already capturing (e.g. started at camera selection)
+        self.error = None
+        self._stop_event = threading.Event()  # fresh event so a lingering old thread can't be revived
+        self._thread = threading.Thread(target=self._run, args=(self._stop_event,), daemon=True)
+        self._thread.start()
 
     def stop(self):
         self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=10)  # let it release the camera before anyone reopens it
 
-    def _run(self):
+    def _run(self, stop_event):
         try:
             detector, self.device_used = load_detector(self.requested_device)
         except Exception as e:
@@ -114,7 +124,7 @@ class VisionService:
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 frame_path = str(Path(tmp) / "frame.jpg")
-                while not self._stop_event.is_set():
+                while not stop_event.is_set():
                     ok, frame = cap.read()
                     if ok:
                         self._detect_frame(detector, frame, frame_path)

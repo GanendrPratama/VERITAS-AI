@@ -63,19 +63,9 @@ on Windows).
 The dashboard and orchestrator are separate processes that only talk over
 that local HTTP API — either can be restarted without killing the other.
 
-Stop both with:
-
-```bash
-# Linux/macOS
-pkill -f orchestrator.py; pkill -f 'streamlit run'
-```
-
-```powershell
-# Windows
-Get-CimInstance Win32_Process |
-  Where-Object { $_.CommandLine -match 'orchestrator\.py|streamlit run' } |
-  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
-```
+Stop both with `scripts/stop.sh` (Linux/macOS) or `scripts\stop.ps1`
+(Windows). They kill the whole process trees, escalate to a force-kill, and
+exit non-zero if anything is still running or holding ports 8000/8501.
 
 ## Status
 

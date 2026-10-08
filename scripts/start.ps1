@@ -53,4 +53,4 @@ Wait-ForPort "dashboard" 8501 "logs\dashboard.err.log"
 
 Write-Host "orchestrator: http://localhost:8000  (log: logs\orchestrator.log)"
 Write-Host "dashboard:    http://localhost:8501  (log: logs\dashboard.log)"
-Write-Host "stop with:    see README.md"
+Write-Host "stop with:    scripts\stop.ps1"

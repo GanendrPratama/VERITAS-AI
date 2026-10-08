@@ -112,7 +112,9 @@ def claims_step(state):
         sel = cams["selected"] if cams["selected"] in cams["cameras"] else cams["cameras"][0]
         pick = st.selectbox("Camera", cams["cameras"], index=cams["cameras"].index(sel),
                             format_func=lambda i: f"Camera {i}")
-        if pick != cams["selected"]:
+        # (re)start the webcam as soon as a camera is chosen, so it's up before calibration
+        if st.session_state.get("cam_started") != pick:
+            st.session_state["cam_started"] = pick
             post("/camera", data=str(pick))
     else:
         st.warning("No camera detected.")

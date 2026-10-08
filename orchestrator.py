@@ -117,6 +117,7 @@ class Orchestrator:
         self.lock = threading.Lock()
         self.sensors = _build_sensors()
         self.vision = _build_vision()
+        self._camera_list = []
         self.recorder = stt.Recorder(samplerate=config["mic_samplerate"])
         self._whisper_model = None
 
@@ -212,7 +213,8 @@ class Orchestrator:
         def stream(svc, missing, idle, extra=None):
             if isinstance(svc, _NullHardwareService):
                 return "down", missing
-            if not live:
+            running = getattr(svc, "is_running", lambda: False)()
+            if not live and not running:
                 return "idle", idle
             if getattr(svc, "error", None):
                 return "down", svc.error
@@ -220,7 +222,7 @@ class Orchestrator:
                 return "down", f"{self.config['ble_device_name']} not found over BLE"
             samples = getattr(svc, "samples", [])
             if not samples:
-                return "down", "no data received yet"
+                return ("idle", "starting camera / face model...") if running else ("down", "no data received yet")
             age = time.time() - samples[-1][0]
             return ("ok", "streaming") if age <= drop else ("down", f"no data for {age:.0f}s")
 
@@ -252,25 +254,24 @@ class Orchestrator:
         ]
 
     def cameras(self):
-        # Probing a device the running capture thread holds would fail, so only probe while idle.
-        with self.lock:
-            idle = self.active is None or self.active["phase"] == "idle"
-        found = []
-        if idle:
+        # Probing a device the capture thread holds would fail, so reuse the last list while it runs.
+        if not self._camera_list or not getattr(self.vision, "is_running", lambda: False)():
             try:
                 from services.vision import list_cameras
 
-                found = list_cameras()
+                self._camera_list = list_cameras()
             except ImportError:
                 pass
-        return {"cameras": found, "selected": getattr(self.vision, "camera_index", None)}
+        return {"cameras": self._camera_list, "selected": getattr(self.vision, "camera_index", None)}
 
     def set_camera(self, index):
         with self.lock:
             if self.active is not None and self.active["phase"] != "idle":
                 raise OrchestratorError("camera can only be changed before calibration starts")
             if hasattr(self.vision, "camera_index"):
+                self.vision.stop()
                 self.vision.camera_index = index
+                self.vision.start()  # open the webcam now so problems show before calibration
 
     def tail_logs(self, which="orchestrator", lines=200):
         if which not in ("orchestrator", "dashboard"):
