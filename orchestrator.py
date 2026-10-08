@@ -21,6 +21,7 @@ the interview (Section 4: degrade, never crash).
 """
 import json
 import re
+import shutil
 import threading
 import time
 import tomllib
@@ -191,6 +192,16 @@ class Orchestrator:
                 raise OrchestratorError(f"no such session: {session_id}", status=404)
             self.active = json.loads(path.read_text())
             return dict(self.active)
+
+    def delete_session(self, session_id):
+        with self.lock:
+            path = self._session_path(session_id)
+            # only ever delete a directory that really is a session under logs/
+            if not re.fullmatch(r"[\w-]+", session_id) or not path.exists():
+                raise OrchestratorError(f"no such session: {session_id}", status=404)
+            shutil.rmtree(path.parent)
+            if self.active and self.active["session_id"] == session_id:
+                self.active = None
 
     def get_state(self):
         with self.lock:
@@ -526,6 +537,17 @@ def make_handler(orch):
                 self._send_json(200, orch.list_sessions())
             else:
                 self._send_json(404, {"error": "not found"})
+
+        def do_DELETE(self):
+            match = re.fullmatch(r"/sessions/([^/]+)", self.path)
+            if not match:
+                self._send_json(404, {"error": "not found"})
+                return
+            try:
+                orch.delete_session(match.group(1))
+                self._send_json(200, {"deleted": match.group(1)})
+            except OrchestratorError as e:
+                self._send_json(e.status, {"error": str(e)})
 
         def do_POST(self):
             try:

@@ -117,6 +117,15 @@ def main():
             status, _ = call(port, "POST", "/sessions/does-not-exist/open")
             assert status == 404
 
+            status, _ = call(port, "DELETE", f"/sessions/{session_b['session_id']}")
+            assert status == 200
+            status, _ = call(port, "DELETE", f"/sessions/{session_b['session_id']}")
+            assert status == 404
+            status, _ = call(port, "DELETE", "/sessions/..")
+            assert status == 404
+            status, sessions = call(port, "GET", "/sessions")
+            assert {s["session_id"] for s in sessions} == {session_a_id}, sessions
+
             status, state = call(port, "POST", "/calibrate/stop")
             assert status == 200 and state["phase"] == "interview", state
 

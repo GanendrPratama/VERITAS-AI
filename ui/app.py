@@ -84,9 +84,22 @@ def landing_screen():
         else:
             options = {f"{s['created_at']} -- {s['label'] or s['session_id']}": s["session_id"] for s in sessions}
             choice = st.selectbox("Session", list(options))
-            if st.button("Open"):
+            open_col, del_col = st.columns(2)
+            if open_col.button("Open"):
                 if post(f"/sessions/{options[choice]}/open") is not None:
                     st.rerun()
+            if del_col.button("Delete"):
+                st.session_state["confirm_delete"] = options[choice]
+            if st.session_state.get("confirm_delete") == options[choice]:
+                st.warning("Permanently delete this session and its logs?")
+                if st.button("Yes, delete", type="primary"):
+                    st.session_state.pop("confirm_delete")
+                    try:
+                        requests.delete(f"{ORCH_URL}/sessions/{options[choice]}", timeout=5).raise_for_status()
+                    except requests.exceptions.RequestException as e:
+                        st.error(f"delete failed: {e}")
+                    else:
+                        st.rerun()
 
 
 def claims_step(state):
