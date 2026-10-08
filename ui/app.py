@@ -45,13 +45,16 @@ h1,h2,h3{letter-spacing:0}
 STEPS = ["Document", "Claims", "Interview", "Results"]
 
 
-def post(path, data=None):
+def post(path, data=None, timeout=120):  # slow actions (LLM, STT, camera restart) share this; refused connections still fail instantly
     try:
-        resp = requests.post(f"{ORCH_URL}{path}", data=data, timeout=5)
+        resp = requests.post(f"{ORCH_URL}{path}", data=data, timeout=timeout)
         if resp.status_code >= 400:
             st.error(resp.json().get("error", "request failed"))
             return None
         return resp.json()
+    except requests.exceptions.Timeout:
+        st.error(f"The orchestrator is still working after {timeout}s -- check its log, then try again.")
+        return None
     except requests.exceptions.RequestException:
         st.error("Can't reach the orchestrator -- is `python orchestrator.py` running?")
         return None
@@ -178,7 +181,7 @@ def claims_step(state):
 
     if st.button("Auto-extract claims from report"):
         with st.spinner("Asking the LLM..."):
-            found = post("/claims/extract")
+            found = post("/claims/extract", timeout=180)
         if found and found["claims"]:
             st.session_state["claims_text"] = "\n".join(found["claims"])
             st.rerun()
