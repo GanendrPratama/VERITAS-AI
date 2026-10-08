@@ -6,7 +6,7 @@ $ports = 8000, 8501
 function Get-Targets {
     Get-CimInstance Win32_Process | Where-Object {
         $_.ProcessId -ne $PID -and $_.CommandLine -and
-        ($_.CommandLine -match 'orchestrator\.py' -or $_.CommandLine -match 'streamlit.*run.*ui[\\/]app\.py')
+        ($_.CommandLine -match 'supervise\.py' -or $_.CommandLine -match 'orchestrator\.py' -or $_.CommandLine -match 'streamlit.*run.*ui[\\/]app\.py')
     }
 }
 function Get-PortOwners {
@@ -15,6 +15,8 @@ function Get-PortOwners {
 }
 
 for ($i = 0; $i -lt 3; $i++) {
+    # supervisor first, or it would restart the orchestrator we're about to kill
+    foreach ($t in @(Get-Targets | Where-Object { $_.CommandLine -match 'supervise\.py' })) { taskkill /PID $t.ProcessId /T /F 2>&1 | Out-Null }
     $ids = @(Get-Targets | ForEach-Object { $_.ProcessId }) + @(Get-PortOwners) | Sort-Object -Unique
     if (-not $ids) { break }
     foreach ($id in $ids) { taskkill /PID $id /T /F 2>&1 | Out-Null }  # /T also kills child processes

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stops the orchestrator and dashboard started by start.sh, escalating to
 # SIGKILL, then verifies nothing is left running or listening on 8000/8501.
-PATTERNS=('orchestrator\.py' 'streamlit run ui/app\.py')
+PATTERNS=('supervise\.py' 'orchestrator\.py' 'streamlit run ui/app\.py')
 PORTS=(8000 8501)
 
 alive() { for p in "${PATTERNS[@]}"; do pgrep -f "$p" >/dev/null && return 0; done; return 1; }
@@ -20,7 +20,7 @@ fi
 
 if alive || listening; then
     echo "FAILED: processes or ports still in use" >&2
-    pgrep -af 'orchestrator\.py|streamlit run' >&2
+    pgrep -af 'supervise\.py|orchestrator\.py|streamlit run' >&2
     ss -ltnp 2>/dev/null | grep -E ":(8000|8501)\s" >&2
     exit 1
 fi

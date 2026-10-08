@@ -210,6 +210,9 @@ def control_panel(state):
             st.warning("Stop recommended")
 
         st.write("**Current question:**", state["current_question"] or "—")
+        if state["recording"]:
+            caption = ((get("/live") or {}).get("stt") or {}).get("partial")
+            st.info(f"🎙 {caption}" if caption else "🎙 Listening…")
         st.write("**Flagged claims:**", state["flagged_claims"] or "none")
         st.write("**Cleared claims:**", state["cleared_claims"] or "none")
         st.write("**Ledger:**")
@@ -275,6 +278,47 @@ def log_body(which):
     st.code(data["text"] if data else "Orchestrator unreachable.", language="log", height=300)
 
 
+@st.fragment(run_every="1s")
+def live_body():
+    live = get("/live")
+    if live is None:
+        st.warning("Orchestrator unreachable.")
+        return
+    cam, mic, sttc, sens = st.columns(4)
+    with cam:
+        st.caption("Webcam")
+        camera_preview()
+        v = live["vision"]
+        st.caption(f"face model: {v['device'] or 'loading / off'}" + (f" -- {v['error']}" if v["error"] else ""))
+        for ch, d in v["channels"].items():
+            st.metric(ch, f"{d['value']:.2f}", help=f"{d['age']}s ago")
+    with mic:
+        st.caption("Microphone" + (" -- RECORDING" if live["mic"]["recording"] else ""))
+        st.progress(live["mic"]["level"])
+        st.caption(live["mic"]["error"] or live["mic"]["device"] or "opening...")
+    with sttc:
+        t = live["stt"]
+        st.caption("Speech-to-text")
+        st.write(f"**{t['state']}**" + (f" ({t['device']})" if t["device"] else ""))
+        if t["partial"]:
+            st.write(f"🎙 {t['partial']}")
+        elif t["last_text"]:
+            st.write(f"“{t['last_text']}”")
+        if t["error"]:
+            st.caption(t["error"])
+    with sens:
+        st.caption("ESP32 sensor")
+        if not live["sensors"]:
+            st.write("no data")
+        for ch, d in live["sensors"].items():
+            st.metric(ch, f"{d['value']:.1f}", help=f"{d['age']}s ago")
+
+
+def live_monitor():
+    if st.toggle("Live monitor (webcam, mic, speech-to-text, sensors)", key="live_on"):
+        live_body()
+
+
 def log_viewer():
     with st.expander("Logs (live)"):
         for tab, which in zip(st.tabs(["Orchestrator", "Dashboard"]), ["orchestrator", "dashboard"]):
@@ -310,4 +354,5 @@ elif step == 2:
     control_panel(state)
 else:
     results_step(state)
+live_monitor()
 log_viewer()

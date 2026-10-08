@@ -126,6 +126,11 @@ class Orchestrator:
         self._camera_list = []
         self.recorder = stt.Recorder(samplerate=config["mic_samplerate"])
         self._whisper_model = None
+        self._stt_device = config["stt_device"]
+        self._stt_lock = threading.Lock()  # one transcription at a time: live captions vs the final pass
+        self._caption_stop = threading.Event()
+        self.stt_status = {"state": "idle", "device": None, "last_text": None, "partial": "", "error": None}
+        self._resume()
 
     # -- persistence --
 
@@ -136,6 +141,28 @@ class Orchestrator:
         path = self._session_path(self.active["session_id"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(self.active))
+        self._remember_active()
+
+    def _remember_active(self):
+        # Pointer so a restarted orchestrator (see scripts/supervise.py) picks the session back up.
+        (self.logs_dir / "active_session").write_text(self.active["session_id"])
+
+    def _resume(self):
+        try:
+            session_id = (self.logs_dir / "active_session").read_text().strip()
+            state = json.loads(self._session_path(session_id).read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        if state.get("phase") in (None, "stopped"):
+            return
+        state["recording"] = False  # the mic capture died with the old process
+        self.active = state
+        if state["phase"] != "idle":
+            self.sensors.start()
+            self.vision.start()
+        # ponytail: calibration baselines live in memory only, so an interview resumed
+        # after a crash has no arousal signal; persist them if that matters.
+        print(f"[orchestrator] resumed session {session_id} in phase {state['phase']}")
 
     def _new_session_id(self):
         base = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -157,7 +184,8 @@ class Orchestrator:
 
     def _whisper(self):
         if self._whisper_model is None:
-            self._whisper_model = stt.load_model(self.config["stt_model"], device=self.config["stt_device"])
+            self.stt_status.update(state="loading model", device=self._stt_device)
+            self._whisper_model = stt.load_model(self.config["stt_model"], device=self._stt_device)
         return self._whisper_model
 
     # -- session lifecycle --
@@ -196,6 +224,7 @@ class Orchestrator:
             if not path.exists():
                 raise OrchestratorError(f"no such session: {session_id}", status=404)
             self.active = json.loads(path.read_text())
+            self._remember_active()
             return dict(self.active)
 
     def delete_session(self, session_id):
@@ -280,6 +309,30 @@ class Orchestrator:
                 pass
         return {"cameras": self._camera_list, "selected": getattr(self.vision, "camera_index", None)}
 
+    def live(self):
+        """Latest readings from every stream. Lock-free on purpose: record_stop holds
+        self.lock through STT/LLM calls, and the live view must keep updating then."""
+
+        def latest(svc):
+            out = {}
+            for t, ch, v in list(getattr(svc, "samples", []))[-90:]:
+                out[ch] = {"value": v, "age": round(time.time() - t, 1)}
+            return out
+
+        try:
+            self.recorder.open()
+        except Exception:
+            pass  # recorder.error carries the reason
+        r = self.recorder
+        return {
+            "mic": {"level": r.level, "device": r.device_name, "error": r.error, "recording": r.is_recording()},
+            "stt": dict(self.stt_status),
+            "sensors": latest(self.sensors),
+            "vision": {"channels": latest(self.vision), "device": getattr(self.vision, "device_used", None),
+                       "running": getattr(self.vision, "is_running", lambda: False)(),
+                       "error": getattr(self.vision, "error", None)},
+        }
+
     def camera_frame(self):
         return getattr(self.vision, "latest_jpeg", None)
 
@@ -354,6 +407,7 @@ class Orchestrator:
                 raise OrchestratorError("already recording")
             try:
                 self.recorder.start()
+                self._start_captions()
             except Exception as e:
                 print(f"[orchestrator] mic recording unavailable: {e}")
             self.active["recording"] = True
@@ -366,6 +420,7 @@ class Orchestrator:
             self._require_active()
             if not self.active["recording"]:
                 raise OrchestratorError("not recording")
+            self._caption_stop.set()
             record_start_ts = self.active["record_start_ts"]
             record_end_ts = time.time()
 
@@ -391,12 +446,53 @@ class Orchestrator:
         except Exception as e:
             print(f"[orchestrator] mic recording unavailable: {e}")
             raise OrchestratorError("no audio captured (mic unavailable) -- type the answer and press Stop again")
-        try:
-            result = stt.transcribe(self._whisper(), str(wav_path), self.config["stt_min_logprob"])
-            return result["text"], result["unclear"]
-        except Exception as e:
-            print(f"[orchestrator] STT failed: {e}")
-            raise OrchestratorError("speech-to-text unavailable -- type the answer and press Stop again")
+        self.stt_status.update(state="transcribing", error=None)
+        with self._stt_lock:
+            result = self._transcribe(str(wav_path))
+        self.stt_status.update(state="ready", last_text=result["text"], partial="")
+        return result["text"], result["unclear"]
+
+    def _transcribe(self, audio, **options):
+        """Whisper call that drops from GPU to CPU once if CUDA libs (e.g. cublas64_12.dll) fail at first use."""
+        for attempt in range(2):
+            try:
+                result = stt.transcribe(self._whisper(), audio, self.config["stt_min_logprob"], **options)
+                self.stt_status["device"] = self._stt_device
+                return result
+            except Exception as e:
+                print(f"[orchestrator] STT failed on {self._stt_device}: {e}")
+                self.stt_status.update(state="failed", error=str(e))
+                if attempt == 0 and self._stt_device != "cpu":
+                    self._stt_device, self._whisper_model = "cpu", None
+                    self.stt_status.update(state="retrying on CPU")
+                    continue
+                raise OrchestratorError("speech-to-text unavailable -- type the answer and press Stop again")
+
+    # -- live captions: re-transcribe the audio so far while the operator records --
+
+    def _start_captions(self):
+        if self.recorder.samplerate != 16000:  # the model takes raw arrays only at 16 kHz
+            return
+        self._caption_stop = threading.Event()
+        self.stt_status["partial"] = ""
+        threading.Thread(target=self._caption_loop, args=(self._caption_stop,), daemon=True).start()
+
+    def _caption_loop(self, stop):
+        # ponytail: re-decodes the last 30s each tick (fine for short answers); real streaming
+        # decode only if CPU can't keep up.
+        while not stop.wait(1.0):
+            audio = self.recorder.snapshot()
+            if audio is None or len(audio) < 16000:
+                continue
+            try:
+                with self._stt_lock:
+                    if stop.is_set():
+                        return
+                    text = self._transcribe(audio[-30 * 16000:], beam_size=1, condition_on_previous_text=False)["text"]
+            except OrchestratorError:
+                return  # STT is broken; the final pass will report it
+            if not stop.is_set():
+                self.stt_status["partial"] = text
 
     def _assess_answer(self, answer_text, unclear, start_ts, end_ts):
         deltas = {}
@@ -523,7 +619,10 @@ def make_handler(orch):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except ConnectionError:
+                pass  # client gave up waiting (e.g. UI 5s timeout during a long STT call)
 
         def _read_body(self):
             length = int(self.headers.get("Content-Length", 0))
@@ -539,6 +638,8 @@ def make_handler(orch):
                     self._send_json(200, orch.tail_logs(self.path[len("/logs/"):] or "orchestrator"))
                 except OrchestratorError as e:
                     self._send_json(e.status, {"error": str(e)})
+            elif self.path == "/live":
+                self._send_json(200, orch.live())
             elif self.path == "/camera/frame":
                 jpeg = orch.camera_frame()
                 if jpeg is None:

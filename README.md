@@ -63,6 +63,11 @@ on Windows).
 The dashboard and orchestrator are separate processes that only talk over
 that local HTTP API — either can be restarted without killing the other.
 
+`start.sh` / `start.ps1` run the orchestrator under `scripts/supervise.py`, which restarts it
+if it ever exits (backoff 2s → 30s; each restart is logged to `logs/orchestrator.log`). A
+session that was open resumes automatically (calibration baselines are not saved, so an
+interview resumed mid-way has no arousal signal).
+
 Stop both with `scripts/stop.sh` (Linux/macOS) or `scripts\stop.ps1`
 (Windows). They kill the whole process trees, escalate to a force-kill, and
 exit non-zero if anything is still running or holding ports 8000/8501.

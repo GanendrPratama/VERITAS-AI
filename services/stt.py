@@ -35,38 +35,71 @@ def write_wav(path, samples_int16, samplerate):
 
 
 class Recorder:
-    """Mic capture for one answer: start() on Record, stop() on Stop."""
+    """Mic capture for one answer: start() on Record, stop() on Stop.
+
+    The input stream stays open once opened (open() is idempotent) so the UI
+    can show a live level meter; frames are only kept while recording."""
 
     def __init__(self, samplerate=16000):
         self.samplerate = samplerate
+        self.level = 0.0  # 0..1, latest block loudness, for the live meter
+        self.error = None
+        self.device_name = None
         self._frames = []
+        self._recording = False
         self._stream = None
 
+    def is_recording(self):
+        return self._recording
+
+    def open(self):
+        if self._stream is not None:
+            return
+        try:
+            import numpy as np
+            import sounddevice as sd
+
+            def _callback(indata, _frames, _time_info, _status):
+                self.level = min(1.0, float(np.sqrt(np.mean(indata.astype("float32") ** 2))) / 8000)
+                if self._recording:
+                    self._frames.append(indata.copy())
+
+            self._stream = sd.InputStream(
+                samplerate=self.samplerate, channels=1, dtype="int16", callback=_callback
+            )
+            self._stream.start()
+            self.device_name = sd.query_devices(kind="input")["name"]
+            self.error = None
+        except Exception as e:
+            self._stream = None
+            self.error = f"{type(e).__name__}: {e}"
+            raise
+
     def start(self):
-        import sounddevice as sd
-
         self._frames = []
+        self.open()
+        self._recording = True
 
-        def _callback(indata, _frames, _time_info, _status):
-            self._frames.append(indata.copy())
+    def snapshot(self):
+        """Audio recorded so far as float32 mono in [-1, 1] (what faster-whisper takes), or None."""
+        import numpy as np
 
-        self._stream = sd.InputStream(
-            samplerate=self.samplerate, channels=1, dtype="int16", callback=_callback
-        )
-        self._stream.start()
+        frames = list(self._frames)
+        return np.concatenate(frames)[:, 0].astype("float32") / 32768 if frames else None
 
     def stop(self, out_path):
         import numpy as np
 
-        self._stream.stop()
-        self._stream.close()
+        self._recording = False
         audio = np.concatenate(self._frames, axis=0) if self._frames else np.zeros((0, 1), dtype="int16")
+        self._frames = []
         write_wav(out_path, audio, self.samplerate)
         return out_path
 
 
-def transcribe(model, audio_path, min_logprob):
-    segments, _info = model.transcribe(audio_path)
+def transcribe(model, audio, min_logprob, **options):
+    """audio: a file path or a 16 kHz float32 array. options go to model.transcribe."""
+    segments, _info = model.transcribe(audio, **options)
     segments = list(segments)
     text = " ".join(s.text.strip() for s in segments).strip()
     avg_logprob = sum(s.avg_logprob for s in segments) / len(segments) if segments else -999.0
