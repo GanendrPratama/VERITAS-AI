@@ -78,8 +78,9 @@ def landing_screen(state):
                 st.rerun()
 
     if (state or {}).get("phase", "idle") == "idle":  # camera can't be switched mid-interview
-        with st.expander("Test webcam"):
+        with st.expander("Test webcam and microphone"):
             camera_panel()
+            device_panel()
 
     with tab_open:
         sessions = get("/sessions") or []
@@ -135,6 +136,30 @@ def camera_panel():
         camera_preview()
 
 
+def device_panel():
+    """Microphone and compute-device pickers (applied immediately, for this run only)."""
+    dev = get("/devices")
+    if dev is None:
+        return
+    mics = {m["index"]: m["name"] for m in dev["mics"]}
+    if mics:
+        ids = list(mics)
+        cur = dev["mic_selected"] if dev["mic_selected"] in mics else ids[0]
+        pick = st.selectbox("Microphone", ids, index=ids.index(cur), format_func=mics.get,
+                            key="mic_pick", help="First entry is used if the system default isn't listed")
+        if pick != dev["mic_selected"] and st.session_state.get("mic_applied") != pick:
+            st.session_state["mic_applied"] = pick
+            post("/devices", data=json.dumps({"mic": pick}))
+    else:
+        st.warning("No microphone detected.")
+    c1, c2 = st.columns(2)
+    for col, key, label in [(c1, "stt_device", "Speech-to-text runs on"), (c2, "vision_device", "Face model runs on")]:
+        opts = ["cuda", "cpu"]
+        choice = col.selectbox(label, opts, index=opts.index(dev[key]) if dev[key] in opts else 0, key=f"dev_{key}")
+        if choice != dev[key]:
+            post("/devices", data=json.dumps({key: choice}))
+
+
 def claims_step(state):
     st.markdown('<div class="kicker">Stage 02 / Context</div>', unsafe_allow_html=True)
     st.title("Claims")
@@ -151,13 +176,23 @@ def claims_step(state):
         st.info(f"Interview is {state['phase']} -- claims can no longer be edited.")
         return
 
-    text = st.text_area("Add claims (one per line)")
+    if st.button("Auto-extract claims from report"):
+        with st.spinner("Asking the LLM..."):
+            found = post("/claims/extract")
+        if found and found["claims"]:
+            st.session_state["claims_text"] = "\n".join(found["claims"])
+            st.rerun()
+        elif found is not None:
+            st.info("No new claims found.")
+    text = st.text_area("Add claims (one per line) -- review and edit before saving", key="claims_text")
     if st.button("Save Claims"):
         lines = [line for line in text.splitlines() if line.strip()]
         if lines and post("/claims", data=json.dumps(lines)) is not None:
+            st.session_state["claims_text"] = ""
             st.rerun()
 
     camera_panel()
+    device_panel()
 
     if state["ledger"] and st.button("Start Interview", type="primary"):
         post("/calibrate/start")

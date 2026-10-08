@@ -102,6 +102,12 @@ def validate_analyst_response(data):
         raise ValueError("missing reasoning")
 
 
+def validate_claims_response(data):
+    claims = data.get("claims")
+    if not isinstance(claims, list) or not all(isinstance(c, str) for c in claims):
+        raise ValueError("claims must be a list of strings")
+
+
 def validate_interviewer_response(data, valid_claim_ids):
     if data.get("type") not in ("anomaly-probe", "deepen", "new-claim"):
         raise ValueError(f"bad type: {data.get('type')!r}")
@@ -133,6 +139,13 @@ if __name__ == "__main__":
 
     prompt = build_analyst_prompt("C=<<CLAIM>>", "r", None, [], "a", "low")
     assert prompt == "C=(none -- identify a new claim)", prompt
+
+    validate_claims_response({"claims": ["a", "b"]})
+    try:
+        validate_claims_response({"claims": "a"})
+        assert False, "should have raised"
+    except ValueError:
+        pass
 
     validate_analyst_response({"state": "consistent", "plausibility": "adequate", "reasoning": "ok"})
     try:

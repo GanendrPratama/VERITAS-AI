@@ -42,6 +42,7 @@ faulthandler.enable()  # a native crash (torch/xgboost/CUDA) now dumps a Python 
 ROOT = Path(__file__).resolve().parent
 LOGS_DIR = ROOT / "logs"
 CONFIG = tomllib.loads((ROOT / "config.toml").read_text())
+CLAIMS_TEMPLATE = (ROOT / "agents" / "claims_prompt.md").read_text()
 ANALYST_TEMPLATE = (ROOT / "agents" / "analyst_prompt.md").read_text()
 INTERVIEWER_TEMPLATE = (ROOT / "agents" / "interviewer_prompt.md").read_text()
 
@@ -372,6 +373,60 @@ class Orchestrator:
             self._save()
             return dict(self.active)
 
+    def extract_claims(self):
+        """Suggest claims from the report via the LLM. Returns them without saving, so the operator can edit first."""
+        with self.lock:
+            self._require_active()
+            report, existing = self.active["report_text"], {c["text"] for c in self.active["ledger"].values()}
+        try:
+            data = llm.call_agent(
+                self.config["ollama_host"], self.config["model"], CLAIMS_TEMPLATE.replace("<<REPORT>>", report),
+                validate=llm.validate_claims_response, keep_alive=self.config["llm_keep_alive"], max_tokens=768,
+            )
+        except (llm.InvalidAgentJSON, OSError) as e:  # OSError covers requests' connection errors
+            raise OrchestratorError(f"couldn't extract claims ({type(e).__name__}: {e}) -- is Ollama running?", status=502)
+        return {"claims": [c.strip() for c in data["claims"] if c.strip() and c.strip() not in existing]}
+
+    # -- microphones and compute devices --
+
+    def devices(self):
+        try:
+            mics = [{"index": i, "name": n} for i, n in stt.list_inputs()]
+            import sounddevice as sd
+
+            selected = self.recorder.device if self.recorder.device is not None else sd.query_devices(kind="input")["index"]
+        except Exception:
+            mics, selected = [], None
+        return {
+            "mics": mics, "mic_selected": selected,
+            "stt_device": self._stt_device, "vision_device": getattr(self.vision, "requested_device", None),
+        }
+
+    def set_devices(self, changes):
+        with self.lock:
+            if self.active and self.active["recording"]:
+                raise OrchestratorError("can't change devices while recording")
+            if "mic" in changes:
+                try:
+                    self.recorder.set_device(changes["mic"])
+                except Exception as e:
+                    raise OrchestratorError(f"couldn't switch microphone: {e}")
+            if "stt_device" in changes:
+                self._set_compute("stt", changes["stt_device"])
+            if "vision_device" in changes:
+                self._set_compute("vision", changes["vision_device"])
+
+    def _set_compute(self, which, device):
+        if device not in ("cuda", "cpu"):
+            raise OrchestratorError(f"unknown device: {device!r}", status=400)
+        if which == "stt":
+            with self._stt_lock:  # don't pull the model out from under a running transcription
+                self._stt_device, self._whisper_model = device, None
+        elif hasattr(self.vision, "requested_device"):
+            self.vision.stop()
+            self.vision.requested_device = device
+            self.vision.start()
+
     # -- turn loop actions, scoped to self.active --
 
     def calibrate_start(self):
@@ -638,6 +693,8 @@ def make_handler(orch):
                     self._send_json(200, orch.tail_logs(self.path[len("/logs/"):] or "orchestrator"))
                 except OrchestratorError as e:
                     self._send_json(e.status, {"error": str(e)})
+            elif self.path == "/devices":
+                self._send_json(200, orch.devices())
             elif self.path == "/live":
                 self._send_json(200, orch.live())
             elif self.path == "/camera/frame":
@@ -686,6 +743,20 @@ def make_handler(orch):
                         self._send_json(400, {"error": "expected a JSON list of claim strings"})
                         return
                     self._send_json(200, orch.add_claims(texts))
+                    return
+
+                if self.path == "/claims/extract":
+                    self._send_json(200, orch.extract_claims())
+                    return
+
+                if self.path == "/devices":
+                    try:
+                        changes = json.loads(self._read_body())
+                    except json.JSONDecodeError:
+                        self._send_json(400, {"error": "expected a JSON object"})
+                        return
+                    orch.set_devices(changes)
+                    self._send_json(200, orch.devices())
                     return
 
                 if self.path == "/camera":

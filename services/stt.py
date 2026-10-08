@@ -34,6 +34,16 @@ def write_wav(path, samples_int16, samplerate):
         f.writeframes(samples_int16.tobytes())
 
 
+def list_inputs():
+    """[(index, name)] of microphones. Windows lists each mic once per host API (MME, WASAPI, ...);
+    keep only the default input's host API so the picker isn't full of duplicates."""
+    import sounddevice as sd
+
+    default_api = sd.query_devices(kind="input")["hostapi"]
+    return [(i, d["name"]) for i, d in enumerate(sd.query_devices())
+            if d["max_input_channels"] > 0 and d["hostapi"] == default_api]
+
+
 class Recorder:
     """Mic capture for one answer: start() on Record, stop() on Stop.
 
@@ -45,6 +55,7 @@ class Recorder:
         self.level = 0.0  # 0..1, latest block loudness, for the live meter
         self.error = None
         self.device_name = None
+        self.device = None  # sounddevice input index; None = system default
         self._frames = []
         self._recording = False
         self._stream = None
@@ -65,15 +76,24 @@ class Recorder:
                     self._frames.append(indata.copy())
 
             self._stream = sd.InputStream(
-                samplerate=self.samplerate, channels=1, dtype="int16", callback=_callback
+                samplerate=self.samplerate, channels=1, dtype="int16", callback=_callback, device=self.device
             )
             self._stream.start()
-            self.device_name = sd.query_devices(kind="input")["name"]
+            self.device_name = sd.query_devices(self.device, kind="input")["name"]
             self.error = None
         except Exception as e:
             self._stream = None
             self.error = f"{type(e).__name__}: {e}"
             raise
+
+    def set_device(self, index):
+        if self._recording:
+            raise RuntimeError("can't switch microphone while recording")
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+        self.device, self.level, self.error = index, 0.0, None
 
     def start(self):
         self._frames = []
