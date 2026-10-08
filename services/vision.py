@@ -99,6 +99,7 @@ class VisionService:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread = None
+        self._last_detect_error = None
         self.latest_jpeg = None  # newest camera frame, for the UI preview
 
     def is_running(self):
@@ -158,8 +159,12 @@ class VisionService:
             for au in AU_CHANNELS:
                 if au in result.columns:
                     self._record(au, float(result[au].iloc[0]))
-        except Exception:
-            pass  # skip a bad/no-face frame, keep going
+        except Exception as e:
+            key = f"{type(e).__name__}: {e}"
+            if key != self._last_detect_error:  # log each distinct failure once, not every frame
+                self._last_detect_error = key
+                print(f"[vision] frame detection failed: {key}", file=sys.stderr, flush=True)
+            # skip the frame, keep going
 
     def _record(self, channel, value):
         with self._lock:

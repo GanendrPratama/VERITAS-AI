@@ -19,12 +19,15 @@ are all best-effort: if a service can't be reached or a library isn't
 installed, that channel's data just stays unavailable rather than crashing
 the interview (Section 4: degrade, never crash).
 """
+import faulthandler
 import json
+import os
 import re
 import shutil
 import threading
 import time
 import tomllib
+os.environ.setdefault("TQDM_DISABLE", "1")  # py-feat's per-frame progress bars flood the log and bury real errors
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -33,6 +36,8 @@ import fusion
 import stoplogic
 from services import llm, stt
 from services.docconvert import pdf_to_markdown
+
+faulthandler.enable()  # a native crash (torch/xgboost/CUDA) now dumps a Python traceback to the .err log
 
 ROOT = Path(__file__).resolve().parent
 LOGS_DIR = ROOT / "logs"
