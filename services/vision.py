@@ -70,14 +70,21 @@ def list_cameras(max_index=5):
     return found
 
 
-def load_detector(device="cuda"):
-    from feat import Detector
+def _make_detector(device):
+    import feat
 
+    if hasattr(feat, "Detector"):  # py-feat < 1.0
+        return feat.Detector(device=device)
+    # py-feat 2.x renamed it. AUs need only face + landmarks, so skip the heavy emotion/identity/gaze models.
+    return feat.Detectorv1(device=device, emotion_model=None, identity_model=None, gaze_model=None)
+
+
+def load_detector(device="cuda"):
     try:
-        return Detector(device=device), device
+        return _make_detector(device), device
     except Exception:
         if device == "cuda":
-            return Detector(device="cpu"), "cpu"
+            return _make_detector("cpu"), "cpu"
         raise
 
 
@@ -144,7 +151,10 @@ class VisionService:
     def _detect_frame(self, detector, frame, frame_path):
         try:
             cv2.imwrite(frame_path, frame)
-            result = detector.detect_image(frame_path)
+            if hasattr(detector, "detect_image"):
+                result = detector.detect_image(frame_path)
+            else:
+                result = detector.detect([frame_path], data_type="image", progress_bar=False)
             for au in AU_CHANNELS:
                 if au in result.columns:
                     self._record(au, float(result[au].iloc[0]))
