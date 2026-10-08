@@ -92,6 +92,7 @@ class VisionService:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread = None
+        self.latest_jpeg = None  # newest camera frame, for the UI preview
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
@@ -110,27 +111,35 @@ class VisionService:
             self._thread.join(timeout=10)  # let it release the camera before anyone reopens it
 
     def _run(self, stop_event):
-        try:
-            detector, self.device_used = load_detector(self.requested_device)
-        except Exception as e:
-            self.error = f"face detector failed to load: {type(e).__name__}: {e}"
-            return  # no vision this session -- channels stay unavailable
-
         cap = open_camera(self.camera_index)
         if not cap.isOpened():
             self.error = f"camera index {self.camera_index} won't open"
             cap.release()
             return
+
+        # Load the (slow) face model in the background so the camera preview works immediately.
+        loaded = {}
+
+        def load():
+            try:
+                loaded["detector"], self.device_used = load_detector(self.requested_device)
+            except Exception as e:
+                self.error = f"face detector failed to load: {type(e).__name__}: {e}"
+
+        threading.Thread(target=load, daemon=True).start()
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 frame_path = str(Path(tmp) / "frame.jpg")
                 while not stop_event.is_set():
                     ok, frame = cap.read()
                     if ok:
-                        self._detect_frame(detector, frame, frame_path)
+                        self.latest_jpeg = cv2.imencode(".jpg", frame)[1].tobytes()
+                        if "detector" in loaded:
+                            self._detect_frame(loaded["detector"], frame, frame_path)
                     time.sleep(0.2)  # ~5 fps -- AU intensity doesn't need more
         finally:
             cap.release()
+            self.latest_jpeg = None
 
     def _detect_frame(self, detector, frame, frame_path):
         try:

@@ -275,6 +275,9 @@ class Orchestrator:
                 pass
         return {"cameras": self._camera_list, "selected": getattr(self.vision, "camera_index", None)}
 
+    def camera_frame(self):
+        return getattr(self.vision, "latest_jpeg", None)
+
     def set_camera(self, index):
         with self.lock:
             if self.active is not None and self.active["phase"] != "idle":
@@ -531,6 +534,16 @@ def make_handler(orch):
                     self._send_json(200, orch.tail_logs(self.path[len("/logs/"):] or "orchestrator"))
                 except OrchestratorError as e:
                     self._send_json(e.status, {"error": str(e)})
+            elif self.path == "/camera/frame":
+                jpeg = orch.camera_frame()
+                if jpeg is None:
+                    self._send_json(404, {"error": "no camera frame"})
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(jpeg)))
+                self.end_headers()
+                self.wfile.write(jpeg)
             elif self.path == "/cameras":
                 self._send_json(200, orch.cameras())
             elif self.path == "/sessions":

@@ -66,7 +66,7 @@ def get(path):
         return None
 
 
-def landing_screen():
+def landing_screen(state):
     st.markdown('<div class="kicker">Stage 01 / Input</div>', unsafe_allow_html=True)
     st.title("Applicant Document")
     tab_new, tab_open = st.tabs(["New Session", "Open Old Session"])
@@ -76,6 +76,10 @@ def landing_screen():
         if pdf is not None and st.button("Create Session"):
             if post("/sessions", data=pdf.getvalue()) is not None:
                 st.rerun()
+
+    if (state or {}).get("phase", "idle") == "idle":  # camera can't be switched mid-interview
+        with st.expander("Test webcam"):
+            camera_panel()
 
     with tab_open:
         sessions = get("/sessions") or []
@@ -102,6 +106,35 @@ def landing_screen():
                         st.rerun()
 
 
+@st.fragment(run_every="1s")
+def camera_preview():
+    try:
+        resp = requests.get(f"{ORCH_URL}/camera/frame", timeout=2)
+    except requests.exceptions.RequestException:
+        resp = None
+    if resp is not None and resp.status_code == 200:
+        st.image(resp.content, use_container_width=True)
+    else:
+        st.caption("No frame yet -- camera still opening, or it failed (see Component Status).")
+
+
+def camera_panel():
+    """Pick a camera and test it. Choosing one opens it immediately, so it's
+    already running by the time calibration starts."""
+    cams = get("/cameras") or {"cameras": [], "selected": None}
+    if not cams["cameras"]:
+        st.warning("No camera detected.")
+        return
+    sel = cams["selected"] if cams["selected"] in cams["cameras"] else cams["cameras"][0]
+    pick = st.selectbox("Camera", cams["cameras"], index=cams["cameras"].index(sel),
+                        format_func=lambda i: f"Camera {i}")
+    if st.session_state.get("cam_started") != pick:
+        st.session_state["cam_started"] = pick
+        post("/camera", data=str(pick))
+    if st.toggle("Show live preview"):
+        camera_preview()
+
+
 def claims_step(state):
     st.markdown('<div class="kicker">Stage 02 / Context</div>', unsafe_allow_html=True)
     st.title("Claims")
@@ -114,30 +147,24 @@ def claims_step(state):
         for cid, c in state["ledger"].items():
             st.write(f"- `{cid}`: {c['text']}")
 
+    if state["phase"] != "idle":
+        st.info(f"Interview is {state['phase']} -- claims can no longer be edited.")
+        return
+
     text = st.text_area("Add claims (one per line)")
     if st.button("Save Claims"):
         lines = [line for line in text.splitlines() if line.strip()]
         if lines and post("/claims", data=json.dumps(lines)) is not None:
             st.rerun()
 
-    cams = get("/cameras") or {"cameras": [], "selected": None}
-    if cams["cameras"]:
-        sel = cams["selected"] if cams["selected"] in cams["cameras"] else cams["cameras"][0]
-        pick = st.selectbox("Camera", cams["cameras"], index=cams["cameras"].index(sel),
-                            format_func=lambda i: f"Camera {i}")
-        # (re)start the webcam as soon as a camera is chosen, so it's up before calibration
-        if st.session_state.get("cam_started") != pick:
-            st.session_state["cam_started"] = pick
-            post("/camera", data=str(pick))
-    else:
-        st.warning("No camera detected.")
+    camera_panel()
 
     if state["ledger"] and st.button("Start Interview", type="primary"):
         post("/calibrate/start")
         st.rerun()
 
     if st.button("Switch Session"):
-        st.session_state["force_landing"] = True
+        st.session_state["view"] = (0, (state or {}).get("phase"))
         st.rerun()
 
 
@@ -152,7 +179,7 @@ def control_panel(state):
     with col_controls:
         st.subheader("Controls")
         if st.button("Switch Session"):
-            st.session_state["force_landing"] = True
+            st.session_state["view"] = (0, (state or {}).get("phase"))
             st.rerun()
         for label, path, kind in [
             ("Finish Calibration", "/calibrate/stop", "secondary"),
@@ -196,7 +223,13 @@ def control_panel(state):
 
 
 def step_of(state):
-    if not state or not state.get("session_id") or st.session_state.get("force_landing"):
+    has_session = bool(state and state.get("session_id"))
+    view = st.session_state.get("view")
+    # A manual view only holds while the session phase is unchanged; a phase change (e.g. Start
+    # Interview) hands control back to the automatic step.
+    if view and view[1] == (state or {}).get("phase") and (has_session or view[0] == 0):
+        return view[0]
+    if not has_session:
         return 0
     return {"idle": 1, "calibration": 2, "interview": 2}.get(state["phase"], 3)
 
@@ -213,13 +246,17 @@ def health_panel():
                     f'<em>{h["status"].upper()}</em></div>', unsafe_allow_html=True)
 
 
-def sidebar(step):
+def sidebar(step, state):
+    has_session = bool(state and state.get("session_id"))
     with st.sidebar:
         st.markdown('<div class="brand"><b>V</b><span>VERITAS-AI<small>Operator Console</small></span></div>',
                     unsafe_allow_html=True)
-        st.markdown("".join(
-            f'<div class="step {"on" if i == step else "done" if i < step else ""}"><i>{"✓" if i < step else i + 1}</i>{n}</div>'
-            for i, n in enumerate(STEPS)), unsafe_allow_html=True)
+        for i, name in enumerate(STEPS):
+            label = f"{'✓' if i < step else i + 1}  {name}"
+            if st.button(label, key=f"nav{i}", disabled=i > 0 and not has_session,
+                         type="primary" if i == step else "secondary", use_container_width=True):
+                st.session_state["view"] = (i, (state or {}).get("phase"))
+                st.rerun()
         st.markdown('<div class="mini">Component Status</div>', unsafe_allow_html=True)
         health_panel()
 
@@ -257,19 +294,20 @@ def results_step(state):
     with st.expander("Report text"):
         st.text(state["report_text"])
     if st.button("New Session", type="primary"):
-        st.session_state["force_landing"] = True
+        st.session_state["view"] = (0, (state or {}).get("phase"))
         st.rerun()
 
 
 state = get("/state")
 step = step_of(state)
-sidebar(step)
+sidebar(step, state)
 alert_banner()
-if step == 3:
-    results_step(state)
-elif state and state.get("session_id") and not st.session_state.get("force_landing"):
+if step == 0:
+    landing_screen(state)
+elif step == 1:
+    claims_step(state)
+elif step == 2:
     control_panel(state)
 else:
-    st.session_state["force_landing"] = False
-    landing_screen()
+    results_step(state)
 log_viewer()
