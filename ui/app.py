@@ -10,7 +10,7 @@ import json
 import requests
 import streamlit as st
 
-ORCH_URL = "http://localhost:8000"
+ORCH_URL = "http://127.0.0.1:8000"
 
 st.set_page_config(page_title="VERITAS-AI | Operator Console", layout="wide")
 
@@ -106,6 +106,16 @@ def claims_step(state):
         lines = [line for line in text.splitlines() if line.strip()]
         if lines and post("/claims", data=json.dumps(lines)) is not None:
             st.rerun()
+
+    cams = get("/cameras") or {"cameras": [], "selected": None}
+    if cams["cameras"]:
+        sel = cams["selected"] if cams["selected"] in cams["cameras"] else cams["cameras"][0]
+        pick = st.selectbox("Camera", cams["cameras"], index=cams["cameras"].index(sel),
+                            format_func=lambda i: f"Camera {i}")
+        if pick != cams["selected"]:
+            post("/camera", data=str(pick))
+    else:
+        st.warning("No camera detected.")
 
     if state["ledger"] and st.button("Start Interview", type="primary"):
         post("/calibrate/start")

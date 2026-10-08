@@ -251,6 +251,27 @@ class Orchestrator:
                                ("Microphone", mic), ("Speech-to-text", stt_), ("LLM (Ollama)", llm_)]
         ]
 
+    def cameras(self):
+        # Probing a device the running capture thread holds would fail, so only probe while idle.
+        with self.lock:
+            idle = self.active is None or self.active["phase"] == "idle"
+        found = []
+        if idle:
+            try:
+                from services.vision import list_cameras
+
+                found = list_cameras()
+            except ImportError:
+                pass
+        return {"cameras": found, "selected": getattr(self.vision, "camera_index", None)}
+
+    def set_camera(self, index):
+        with self.lock:
+            if self.active is not None and self.active["phase"] != "idle":
+                raise OrchestratorError("camera can only be changed before calibration starts")
+            if hasattr(self.vision, "camera_index"):
+                self.vision.camera_index = index
+
     def tail_logs(self, which="orchestrator", lines=200):
         if which not in ("orchestrator", "dashboard"):
             raise OrchestratorError(f"unknown log: {which}", status=404)
@@ -498,6 +519,8 @@ def make_handler(orch):
                     self._send_json(200, orch.tail_logs(self.path[len("/logs/"):] or "orchestrator"))
                 except OrchestratorError as e:
                     self._send_json(e.status, {"error": str(e)})
+            elif self.path == "/cameras":
+                self._send_json(200, orch.cameras())
             elif self.path == "/sessions":
                 self._send_json(200, orch.list_sessions())
             else:
@@ -521,6 +544,16 @@ def make_handler(orch):
                         self._send_json(400, {"error": "expected a JSON list of claim strings"})
                         return
                     self._send_json(200, orch.add_claims(texts))
+                    return
+
+                if self.path == "/camera":
+                    try:
+                        index = int(self._read_body())
+                    except ValueError:
+                        self._send_json(400, {"error": "expected a camera index"})
+                        return
+                    orch.set_camera(index)
+                    self._send_json(200, orch.cameras())
                     return
 
                 if self.path == "/record/stop":
@@ -548,7 +581,7 @@ def make_handler(orch):
     return Handler
 
 
-def serve(host="localhost", port=8000):
+def serve(host="127.0.0.1", port=8000):
     orch = Orchestrator()
     server = ThreadingHTTPServer((host, port), make_handler(orch))
     print(f"[orchestrator] API listening on http://{host}:{port}")

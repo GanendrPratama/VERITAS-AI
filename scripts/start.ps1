@@ -36,7 +36,7 @@ function Wait-ForPort($name, $port, $errLog, $timeoutSec = 30) {
     Write-Host -NoNewline "waiting for $name on port $port "
     $deadline = (Get-Date).AddSeconds($timeoutSec)
     while ((Get-Date) -lt $deadline) {
-        if (Test-NetConnection -ComputerName localhost -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue) {
+        if (Test-NetConnection -ComputerName 127.0.0.1 -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue) {
             Write-Host " up"
             return
         }
@@ -44,10 +44,11 @@ function Wait-ForPort($name, $port, $errLog, $timeoutSec = 30) {
         Start-Sleep -Seconds 1
     }
     Write-Host " timed out"
-    Write-Host "$name didn't come up in ${timeoutSec}s -- check $errLog"
+    Write-Host "$name didn't come up in ${timeoutSec}s -- last lines of ${errLog}:"
+    if (Test-Path $errLog) { Get-Content $errLog -Tail 15 }
 }
 
-Wait-ForPort "orchestrator" 8000 "logs\orchestrator.err.log"
+Wait-ForPort "orchestrator" 8000 "logs\orchestrator.err.log" 90
 Wait-ForPort "dashboard" 8501 "logs\dashboard.err.log"
 
 Write-Host "orchestrator: http://localhost:8000  (log: logs\orchestrator.log)"

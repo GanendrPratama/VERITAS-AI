@@ -17,6 +17,7 @@ services/__init__.py, and each service file is meant to stand alone and run
 standalone, same as stt.py/llm.py).
 """
 import statistics
+import sys
 import tempfile
 import threading
 import time
@@ -49,6 +50,24 @@ def delta_sd_from_window(window, baseline):
         values = grouped.get(ch)
         deltas[ch] = None if not values or sd == 0 else (statistics.mean(values) - mean) / sd
     return deltas
+
+
+# MSMF (OpenCV's Windows default) often fails to open webcams; DirectShow is reliable.
+CAP_BACKEND = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+
+
+def open_camera(index):
+    return cv2.VideoCapture(index, CAP_BACKEND)
+
+
+def list_cameras(max_index=5):
+    found = []
+    for i in range(max_index):
+        cap = open_camera(i)
+        if cap.isOpened():
+            found.append(i)
+        cap.release()
+    return found
 
 
 def load_detector(device="cuda"):
@@ -87,9 +106,11 @@ class VisionService:
             self.error = f"face detector failed to load: {type(e).__name__}: {e}"
             return  # no vision this session -- channels stay unavailable
 
-        cap = cv2.VideoCapture(self.camera_index)
+        cap = open_camera(self.camera_index)
         if not cap.isOpened():
             self.error = f"camera index {self.camera_index} won't open"
+            cap.release()
+            return
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 frame_path = str(Path(tmp) / "frame.jpg")
