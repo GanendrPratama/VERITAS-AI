@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import tomllib
@@ -926,9 +927,15 @@ def make_handler(orch):
     return Handler
 
 
+class Server(ThreadingHTTPServer):
+    # On Windows SO_REUSEADDR lets a second orchestrator bind the same port alongside a running
+    # one (requests then split between two processes with different state); fail to bind instead.
+    allow_reuse_address = sys.platform != "win32"
+
+
 def serve(host="127.0.0.1", port=8000):
     orch = Orchestrator()
-    server = ThreadingHTTPServer((host, port), make_handler(orch))
+    server = Server((host, port), make_handler(orch))
     print(f"[orchestrator] API listening on http://{host}:{port}")
     server.serve_forever()
 
