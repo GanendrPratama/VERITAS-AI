@@ -10,12 +10,15 @@ Given:
 - CLAIM: the specific claim this answer is being checked against, or the text
   `(none -- identify a new claim)` if this was a new-claim probe.
 - TRANSCRIPT: prior question/answer turns in this interview.
-- ANSWER: the subject's latest answer, being assessed now.
+- QUESTION: the question the subject was just asked.
+- ANSWER: the subject's latest answer to QUESTION, being assessed now.
 - AROUSAL: `low | elevated | high | unavailable` for this answer.
 
 Decide:
 - `state`: `consistent` | `contradicted` | `evasive` -- does the answer align
   with, conflict with, or dodge the report/prior answers regarding CLAIM?
+  An answer that does not address QUESTION at all (changes the subject,
+  answers something else) is `evasive`, even if what it says is true.
 - `plausibility`: `adequate` | `vague` | `non_answer` | `refusal`.
 - `reasoning`: one sentence, grounded only in REPORT/TRANSCRIPT/ANSWER -- no
   speculation, no outside facts.
@@ -39,6 +42,9 @@ CLAIM:
 
 TRANSCRIPT:
 <<TRANSCRIPT>>
+
+QUESTION:
+<<QUESTION>>
 
 ANSWER:
 <<ANSWER>>

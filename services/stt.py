@@ -107,6 +107,11 @@ class Recorder:
         frames = list(self._frames)
         return np.concatenate(frames)[:, 0].astype("float32") / 32768 if frames else None
 
+    def cancel(self):
+        """Stop recording and discard what was captured (session stopped mid-answer)."""
+        self._recording = False
+        self._frames = []
+
     def stop(self, out_path):
         import numpy as np
 
@@ -119,8 +124,11 @@ class Recorder:
         return out_path
 
 
-def transcribe(model, audio, min_logprob, **options):
-    """audio: a file path or a 16 kHz float32 array. options go to model.transcribe."""
+def transcribe(model, audio, min_logprob, language=None, **options):
+    """audio: a file path or a 16 kHz float32 array. options go to model.transcribe.
+    language: e.g. "id" -- pinning it beats auto-detection, which often misfires on short answers."""
+    if language:
+        options["language"] = language
     segments, _info = model.transcribe(audio, **options)
     segments = list(segments)
     text = " ".join(s.text.strip() for s in segments).strip()
@@ -134,13 +142,20 @@ if __name__ == "__main__":
             self.text, self.avg_logprob = text, avg_logprob
 
     class FakeModel:
-        def transcribe(self, path):
+        def transcribe(self, path, **options):
+            self.options = options
             return [FakeSeg(" halo", -0.2), FakeSeg(" dunia", -0.3)], None
 
     assert transcribe(FakeModel(), "fake.wav", min_logprob=-1.0) == {
         "text": "halo dunia",
         "unclear": False,
     }
+
+    fake = FakeModel()
+    transcribe(fake, "fake.wav", min_logprob=-1.0, language="id")
+    assert fake.options == {"language": "id"}, fake.options
+    transcribe(fake, "fake.wav", min_logprob=-1.0, language=None)
+    assert fake.options == {}, fake.options
 
     class FakeGarbledModel:
         def transcribe(self, path):

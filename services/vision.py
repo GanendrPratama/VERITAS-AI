@@ -16,6 +16,7 @@ duplicated rather than imported cross-module (this repo has no
 services/__init__.py, and each service file is meant to stand alone and run
 standalone, same as stt.py/llm.py).
 """
+import math
 import statistics
 import sys
 import tempfile
@@ -79,13 +80,31 @@ def _make_detector(device):
     return feat.Detectorv1(device=device, emotion_model=None, identity_model=None, gaze_model=None)
 
 
-def load_detector(device="cuda"):
+def _load_on(device):
     try:
         return _make_detector(device), device
     except Exception:
         if device == "cuda":
             return _make_detector("cpu"), "cpu"
         raise
+
+
+def load_detector(device="cuda"):
+    """Cached weights first: py-feat otherwise asks the HF Hub for the newest revision on every
+    start, and when upstream publishes new weights over a slow link the camera hangs on
+    "starting face model" for as long as that download takes. Online only if nothing is cached."""
+    try:
+        import huggingface_hub.constants as hf
+    except ImportError:
+        return _load_on(device)
+    was_offline, hf.HF_HUB_OFFLINE = hf.HF_HUB_OFFLINE, True
+    try:
+        return _load_on(device)
+    except Exception as e:
+        print(f"[vision] no cached face model ({type(e).__name__}); downloading", file=sys.stderr, flush=True)
+    finally:
+        hf.HF_HUB_OFFLINE = was_offline
+    return _load_on(device)
 
 
 class VisionService:
@@ -158,7 +177,9 @@ class VisionService:
                 result = detector.detect([frame_path], data_type="image", progress_bar=False)
             for au in AU_CHANNELS:
                 if au in result.columns:
-                    self._record(au, float(result[au].iloc[0]))
+                    value = float(result[au].iloc[0])
+                    if math.isfinite(value):  # NaN when no face is found; it would poison the baseline stats
+                        self._record(au, value)
         except Exception as e:
             key = f"{type(e).__name__}: {e}"
             if key != self._last_detect_error:  # log each distinct failure once, not every frame
@@ -195,6 +216,27 @@ def _selfcheck():
     assert abs(deltas["AU04"] - 3.0) < 1e-9, deltas
 
     assert delta_sd_from_window([], baseline) == {"AU04": None}
+
+    # a face-less frame (NaN AUs) is skipped, not recorded
+    class FakeResult:
+        columns = AU_CHANNELS
+
+        def __getitem__(self, _au):
+            import pandas as pd
+
+            return pd.Series([float("nan")])
+
+    class FakeDetector:
+        def detect(self, *_a, **_k):
+            return FakeResult()
+
+    svc = VisionService.__new__(VisionService)
+    svc.samples, svc._lock, svc._last_detect_error = [], threading.Lock(), None
+    import numpy as np
+
+    with tempfile.TemporaryDirectory() as tmp:
+        svc._detect_frame(FakeDetector(), np.zeros((8, 8, 3), dtype="uint8"), str(Path(tmp) / "f.jpg"))
+    assert svc.samples == [], svc.samples
     print("vision.py self-check passed (baseline/delta math only -- no camera/py-feat here)")
 
 
