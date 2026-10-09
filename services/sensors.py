@@ -62,19 +62,26 @@ class SensorService:
         self._loop = None
         self._client = None
         self._connected = threading.Event()
+        self._thread = None
         self.error = None  # last failure reason, shown in the UI status panel
 
     def start(self):
         # Non-blocking: BLE scan/connect can take seconds, and calibrate_start
         # shouldn't stall on it -- the channel just has no samples until (and
         # unless) this connects. Check is_connected() if the UI wants status.
-        threading.Thread(target=self._run_loop, daemon=True).start()
+        if self._thread is not None and self._thread.is_alive():
+            return  # already scanning/connected (e.g. a session reopened mid-interview)
+        self.error = None
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
 
     def is_connected(self):
         return self._connected.is_set()
 
     def stop(self):
-        if self._loop:
+        # Only while the loop is alive -- after a failed scan it has already finished, and
+        # scheduling onto it just leaks a never-awaited coroutine.
+        if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self._disconnect(), self._loop)
 
     def _run_loop(self):
@@ -97,6 +104,9 @@ class SensorService:
                     await asyncio.sleep(0.5)
         except Exception as e:
             self.error = f"{type(e).__name__}: {e}"  # degrade gracefully -- channel just stays unavailable
+        finally:
+            self._connected.clear()
+            self._client = None
 
     async def _disconnect(self):
         if self._client:

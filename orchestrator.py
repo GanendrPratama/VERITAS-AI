@@ -182,6 +182,27 @@ class Orchestrator:
             n += 1
         return f"c{n}"
 
+    def _release_capture(self):
+        """Drop any in-progress mic capture and live captions (session ending or switching)."""
+        self._caption_stop.set()
+        if self.recorder.is_recording():
+            self.recorder.cancel()
+
+    def _switch_session(self, state):
+        """Make `state` the active session, moving capture hardware over from the old one --
+        otherwise the old session's mic recording and camera/BLE capture keep running."""
+        self._release_capture()
+        old_live = self.active is not None and self.active["phase"] in ("calibration", "interview")
+        new_live = state["phase"] in ("calibration", "interview")
+        if new_live:
+            self.sensors.start()
+            self.vision.start()
+        elif old_live:
+            self.sensors.stop()
+            self.vision.stop()
+        state["recording"] = False  # whatever capture it had belonged to another session or process
+        self.active = state
+
     def _require_active(self):
         if self.active is None:
             raise OrchestratorError("no active session -- create or open one first")
@@ -200,7 +221,7 @@ class Orchestrator:
                 report_text = pdf_to_markdown(pdf_bytes)
             except Exception as e:
                 raise OrchestratorError(f"couldn't read PDF: {e}", status=400)
-            self.active = new_session_state(self._new_session_id(), report_text)
+            self._switch_session(new_session_state(self._new_session_id(), report_text))
             self._save()
             return dict(self.active)
 
@@ -227,7 +248,7 @@ class Orchestrator:
             path = self._session_path(session_id)
             if not path.exists():
                 raise OrchestratorError(f"no such session: {session_id}", status=404)
-            self.active = json.loads(path.read_text())
+            self._switch_session(json.loads(path.read_text()))
             self._remember_active()
             return dict(self.active)
 
@@ -237,9 +258,12 @@ class Orchestrator:
             # only ever delete a directory that really is a session under logs/
             if not re.fullmatch(r"[\w-]+", session_id) or not path.exists():
                 raise OrchestratorError(f"no such session: {session_id}", status=404)
-            shutil.rmtree(path.parent)
             if self.active and self.active["session_id"] == session_id:
+                self._release_capture()
+                self.sensors.stop()
+                self.vision.stop()
                 self.active = None
+            shutil.rmtree(path.parent)
 
     def get_state(self):
         with self.lock:
@@ -271,6 +295,8 @@ class Orchestrator:
                 return "down", f"{self.config['ble_device_name']} not found over BLE"
             samples = getattr(svc, "samples", [])
             if not samples:
+                if running and getattr(svc, "device_used", None):  # face model loaded, frames analysed
+                    return "down", "camera on, but no face detected -- check the preview shows the subject"
                 return ("idle", "starting camera / face model...") if running else ("down", "no data received yet")
             age = time.time() - samples[-1][0]
             return ("ok", "streaming") if age <= drop else ("down", f"no data for {age:.0f}s")
@@ -283,7 +309,7 @@ class Orchestrator:
         try:
             import sounddevice as sd
 
-            mic = ("ok", sd.query_devices(kind="input")["name"])
+            mic = ("ok", sd.query_devices(self.recorder.device, kind="input")["name"])  # the selected mic
         except Exception as e:
             mic = ("down", f"no input device ({e})")
 
@@ -550,7 +576,8 @@ class Orchestrator:
         """Whisper call that drops from GPU to CPU once if CUDA libs (e.g. cublas64_12.dll) fail at first use."""
         for attempt in range(2):
             try:
-                result = stt.transcribe(self._whisper(), audio, self.config["stt_min_logprob"], **options)
+                result = stt.transcribe(self._whisper(), audio, self.config["stt_min_logprob"],
+                                        language=self.config.get("stt_language") or None, **options)
                 self.stt_status["device"] = self._stt_device
                 return result
             except Exception as e:
@@ -610,7 +637,8 @@ class Orchestrator:
             return {"state": "evasive", "plausibility": "non_answer",
                     "reasoning": "answer unclear (STT)", "new_claim_text": None}
         prompt = llm.build_analyst_prompt(
-            ANALYST_TEMPLATE, ctx["report_text"], ctx["claim_text"], ctx["history"], answer_text, ctx["arousal"]
+            ANALYST_TEMPLATE, ctx["report_text"], ctx["claim_text"], ctx["history"], answer_text, ctx["arousal"],
+            question=ctx["question"],
         )
         try:
             return llm.call_agent(
@@ -695,6 +723,7 @@ class Orchestrator:
     def stop_interview(self):
         with self.lock:
             self._require_active()
+            self._release_capture()  # stopping mid-answer must not leave the mic recording
             self.sensors.stop()
             self.vision.stop()
             self.active["phase"] = "stopped"

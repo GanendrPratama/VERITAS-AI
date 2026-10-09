@@ -49,7 +49,7 @@ def start_server(logs_dir):
     orchestrator.Orchestrator._capture_answer = lambda self, wav_path: ("saya ada di rumah", False)
 
     server = orchestrator.ThreadingHTTPServer(
-        ("localhost", 0), orchestrator.make_handler(orchestrator.Orchestrator(logs_dir=logs_dir))
+        ("127.0.0.1", 0), orchestrator.make_handler(orchestrator.Orchestrator(logs_dir=logs_dir))
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -59,7 +59,8 @@ def start_server(logs_dir):
 def call(port, method, path, body=None):
     if body is not None and not isinstance(body, (bytes, bytearray)):
         body = json.dumps(body).encode()
-    req = urllib.request.Request(f"http://localhost:{port}{path}", data=body, method=method)
+    # 127.0.0.1, not localhost: on Windows localhost tries ::1 first and adds ~2s to every request
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=body, method=method)
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status, json.loads(resp.read())
@@ -172,6 +173,22 @@ def main():
             status, state = call(port, "POST", "/record/stop", b"saya di rumah")
             assert status == 200 and state["recording"] is False, state
             assert state["transcript"][-1]["answer"] == "saya di rumah", state["transcript"]
+
+            # Stopping mid-answer releases the mic -- it used to keep recording into the next
+            # session, which then couldn't switch microphones.
+            call(port, "POST", "/sessions", make_test_pdf())
+            call(port, "POST", "/claims", ["was at home at 10pm"])
+            call(port, "POST", "/calibrate/start")
+            call(port, "POST", "/calibrate/stop")
+            call(port, "POST", "/generate-question")
+            call(port, "POST", "/record/start")
+            call(port, "POST", "/stop-interview")
+            status, live = call(port, "GET", "/live")
+            assert status == 200 and live["mic"]["recording"] is False, live["mic"]
+            status, _ = call(port, "POST", "/sessions", make_test_pdf())
+            assert status == 200
+            status, live = call(port, "GET", "/live")
+            assert live["mic"]["recording"] is False, live["mic"]
 
             print("test_orchestrator_api.py passed")
         finally:

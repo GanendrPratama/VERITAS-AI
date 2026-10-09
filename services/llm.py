@@ -74,10 +74,11 @@ def render_ledger(ledger):
     return "\n".join(f"{cid}: {c['text']} [{c['state']}]" for cid, c in ledger.items())
 
 
-def build_analyst_prompt(template, report, claim_text, transcript_turns, answer, arousal):
+def build_analyst_prompt(template, report, claim_text, transcript_turns, answer, arousal, question=None):
     claim = claim_text if claim_text is not None else "(none -- identify a new claim)"
     return (
         template.replace("<<REPORT>>", report)
+        .replace("<<QUESTION>>", question or "(not recorded)")
         .replace("<<CLAIM>>", claim)
         .replace("<<TRANSCRIPT>>", render_transcript(transcript_turns))
         .replace("<<ANSWER>>", answer)
@@ -139,6 +140,9 @@ if __name__ == "__main__":
 
     prompt = build_analyst_prompt("C=<<CLAIM>>", "r", None, [], "a", "low")
     assert prompt == "C=(none -- identify a new claim)", prompt
+
+    assert build_analyst_prompt("Q=<<QUESTION>>", "r", None, [], "a", "low", question="Di mana?") == "Q=Di mana?"
+    assert build_analyst_prompt("Q=<<QUESTION>>", "r", None, [], "a", "low") == "Q=(not recorded)"
 
     validate_claims_response({"claims": ["a", "b"]})
     try:
