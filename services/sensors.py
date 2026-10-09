@@ -17,7 +17,10 @@ import statistics
 import threading
 import time
 
-from bleak import BleakClient, BleakScanner
+try:
+    from bleak import BleakClient, BleakScanner
+except ImportError:  # keep the pure baseline/delta math importable without BLE support
+    BleakClient = BleakScanner = None
 
 
 def _group_by_channel(window):
@@ -48,6 +51,8 @@ def delta_sd_from_window(window, baseline):
 
 class SensorService:
     def __init__(self, device_name, hr_char_uuid, gsr_char_uuid):
+        if BleakClient is None:
+            raise ImportError("bleak not installed")
         self.device_name = device_name
         self.hr_char_uuid = hr_char_uuid
         self.gsr_char_uuid = gsr_char_uuid

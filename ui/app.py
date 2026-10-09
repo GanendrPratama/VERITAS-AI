@@ -70,6 +70,19 @@ def get(path):
         return None
 
 
+def text_area(label, name):
+    """A text area the app can fill or clear. Assigning st.session_state[key] loses to the
+    stale value the browser sends with the next auto-refresh (the 1-3s fragments below), so
+    a new value is shown through a fresh widget key instead."""
+    rev = st.session_state.get(f"{name}_rev", 0)
+    return st.text_area(label, value=st.session_state.get(f"{name}_value", ""), key=f"{name}_{rev}")
+
+
+def set_text_area(name, value):
+    st.session_state[f"{name}_value"] = value
+    st.session_state[f"{name}_rev"] = st.session_state.get(f"{name}_rev", 0) + 1
+
+
 def landing_screen(state):
     st.markdown('<div class="kicker">Stage 01 / Input</div>', unsafe_allow_html=True)
     st.title("Applicant Document")
@@ -184,15 +197,15 @@ def claims_step(state):
         with st.spinner("Asking the LLM..."):
             found = post("/claims/extract", timeout=180)
         if found and found["claims"]:
-            st.session_state["claims_text"] = "\n".join(found["claims"])
+            set_text_area("claims_text", "\n".join(found["claims"]))
             st.rerun()
         elif found is not None:
             st.info("No new claims found.")
-    text = st.text_area("Add claims (one per line) -- review and edit before saving", key="claims_text")
+    text = text_area("Add claims (one per line) -- review and edit before saving", "claims_text")
     if st.button("Save Claims"):
         lines = [line for line in text.splitlines() if line.strip()]
         if lines and post("/claims", data=json.dumps(lines)) is not None:
-            st.session_state["claims_text"] = ""
+            set_text_area("claims_text", "")
             st.rerun()
 
     camera_panel()
@@ -203,7 +216,7 @@ def claims_step(state):
         st.rerun()
 
     if st.button("Switch Session"):
-        st.session_state["view"] = (0, (state or {}).get("phase"))
+        st.session_state["view"] = (0, view_key(state))
         st.rerun()
 
 
@@ -218,7 +231,7 @@ def control_panel(state):
     with col_controls:
         st.subheader("Controls")
         if st.button("Switch Session"):
-            st.session_state["view"] = (0, (state or {}).get("phase"))
+            st.session_state["view"] = (0, view_key(state))
             st.rerun()
         for label, path, kind in [
             ("Finish Calibration", "/calibrate/stop", "secondary"),
@@ -227,10 +240,10 @@ def control_panel(state):
             ("Stop Interview", "/stop-interview", "primary"),
         ]:
             if label == "Generate Question":
-                typed = st.text_area("Typed answer (only if mic/STT unavailable)", key="typed_answer")
+                typed = text_area("Typed answer (only if mic/STT unavailable)", "typed_answer")
                 # STT (CPU fallback on a long answer) + up to two 60s Analyst tries
                 if st.button("Stop", key="stop_rec") and post("/record/stop", data=typed.encode("utf-8"), timeout=300) is not None:
-                    st.session_state["typed_answer"] = ""
+                    set_text_area("typed_answer", "")
                     st.rerun()
             # Rerun only on success -- a rerun would wipe the error post() just showed.
             if st.button(label, type=kind) and post(path, timeout=SLOW_TIMEOUTS.get(path, 120)) is not None:
@@ -265,12 +278,16 @@ def control_panel(state):
         live_state()
 
 
+def view_key(state):
+    return (state or {}).get("session_id"), (state or {}).get("phase")
+
+
 def step_of(state):
     has_session = bool(state and state.get("session_id"))
     view = st.session_state.get("view")
-    # A manual view only holds while the session phase is unchanged; a phase change (e.g. Start
-    # Interview) hands control back to the automatic step.
-    if view and view[1] == (state or {}).get("phase") and (has_session or view[0] == 0):
+    # A manual view only holds while the session and its phase are unchanged; a phase change
+    # (e.g. Start Interview) or a new/opened session hands control back to the automatic step.
+    if view and view[1] == view_key(state) and (has_session or view[0] == 0):
         return view[0]
     if not has_session:
         return 0
@@ -298,7 +315,7 @@ def sidebar(step, state):
             label = f"{'✓' if i < step else i + 1}  {name}"
             if st.button(label, key=f"nav{i}", disabled=i > 0 and not has_session,
                          type="primary" if i == step else "secondary", use_container_width=True):
-                st.session_state["view"] = (i, (state or {}).get("phase"))
+                st.session_state["view"] = (i, view_key(state))
                 st.rerun()
         st.markdown('<div class="mini">Component Status</div>', unsafe_allow_html=True)
         health_panel()
@@ -378,7 +395,7 @@ def results_step(state):
     with st.expander("Report text"):
         st.text(state["report_text"])
     if st.button("New Session", type="primary"):
-        st.session_state["view"] = (0, (state or {}).get("phase"))
+        st.session_state["view"] = (0, view_key(state))
         st.rerun()
 
 
