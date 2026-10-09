@@ -18,6 +18,7 @@ llm_keep_alive = "30m"
 llm_max_tokens = 256
 llm_context_turns = 6
 stt_device = "cuda"
+stt_language = "id"  # Whisper language code for answers; "" = auto-detect
 ollama_host = "http://localhost:11434"
 
 vision_device = "cuda"
