@@ -684,7 +684,9 @@ def make_handler(orch):
             return self.rfile.read(length) if length else b""
 
         def do_GET(self):
-            if self.path == "/state":
+            if self.path == "/ping":  # lock-free liveness check for scripts/supervise.py
+                self._send_json(200, {"ok": True})
+            elif self.path == "/state":
                 self._send_json(200, orch.get_state())
             elif self.path == "/health":
                 self._send_json(200, orch.health())
