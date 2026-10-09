@@ -333,8 +333,10 @@ class Orchestrator:
         ]
 
     def cameras(self):
-        # Probing a device the capture thread holds would fail, so reuse the last list while it runs.
-        if not self._camera_list or not getattr(self.vision, "is_running", lambda: False)():
+        # Probing opens and releases every camera (the webcam light blinks), and the dashboard asks
+        # on every rerun -- so probe once and reuse the list; set_camera/calibration re-probe as needed.
+        # Probing a device the capture thread holds would fail anyway.
+        if not self._camera_list and not getattr(self.vision, "is_running", lambda: False)():
             self._pick_camera()
         try:
             from services.vision import CAMERA_NOTES
