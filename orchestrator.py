@@ -280,7 +280,8 @@ class Orchestrator:
             return importlib.util.find_spec(name) is not None
 
         with self.lock:
-            live = self.active is not None and self.active["phase"] != "idle"
+            # a stopped session's capture is off too -- don't report its last errors as live
+            live = self.active is not None and self.active["phase"] in ("calibration", "interview")
         drop = self.config["sensor_dropout_sec"]
 
         def stream(svc, missing, idle, extra=None):
@@ -293,6 +294,8 @@ class Orchestrator:
                 return "down", svc.error
             if extra == "no_ble":
                 return "down", f"{self.config['ble_device_name']} not found over BLE"
+            if running and getattr(svc, "frame_note", None):
+                return "down", f"camera shows a {svc.frame_note}"
             samples = getattr(svc, "samples", [])
             if not samples:
                 if running and getattr(svc, "device_used", None):  # face model loaded, frames analysed
@@ -331,13 +334,30 @@ class Orchestrator:
     def cameras(self):
         # Probing a device the capture thread holds would fail, so reuse the last list while it runs.
         if not self._camera_list or not getattr(self.vision, "is_running", lambda: False)():
-            try:
-                from services.vision import list_cameras
+            self._pick_camera()
+        try:
+            from services.vision import CAMERA_NOTES
+        except ImportError:
+            CAMERA_NOTES = {}
+        return {
+            "cameras": [c["index"] for c in self._camera_list],
+            "notes": {str(c["index"]): CAMERA_NOTES.get(c["kind"]) for c in self._camera_list},
+            "selected": getattr(self.vision, "camera_index", None),
+        }
 
-                self._camera_list = list_cameras()
-            except ImportError:
-                pass
-        return {"cameras": self._camera_list, "selected": getattr(self.vision, "camera_index", None)}
+    def _pick_camera(self):
+        """Re-probe the cameras and, while capture is off, move off a configured/stale index that
+        doesn't open (or is a frozen virtual camera) onto the best real one."""
+        try:
+            from services.vision import list_cameras, pick_camera
+        except ImportError:
+            return
+        self._camera_list = list_cameras()
+        if hasattr(self.vision, "camera_index") and not self.vision.is_running():
+            best = pick_camera(self._camera_list, self.vision.camera_index)
+            if best is not None and best != self.vision.camera_index:
+                print(f"[orchestrator] camera {self.vision.camera_index} unusable; using camera {best}")
+                self.vision.camera_index = best
 
     def live(self):
         """Latest readings from every stream. Lock-free: it only reads the services'
@@ -368,10 +388,15 @@ class Orchestrator:
 
     def set_camera(self, index):
         with self.lock:
-            if self.active is not None and self.active["phase"] != "idle":
-                raise OrchestratorError("camera can only be changed before calibration starts")
+            if self.active is not None and self.active["phase"] in ("calibration", "interview"):
+                raise OrchestratorError("camera can't be changed during an interview")
             if hasattr(self.vision, "camera_index"):
-                self.vision.stop()
+                from services.vision import probe_camera
+
+                self.vision.stop()  # release the device so it can be probed
+                if probe_camera(index) is None:
+                    self.vision.start()  # keep the old camera running
+                    raise OrchestratorError(f"camera {index} won't open", status=400)
                 self.vision.camera_index = index
                 self.vision.start()  # open the webcam now so problems show before calibration
 
@@ -464,6 +489,8 @@ class Orchestrator:
             if self.active["phase"] != "idle":
                 raise OrchestratorError(f"cannot start calibration from phase {self.active['phase']}")
             self.sensors.start()
+            if not getattr(self.vision, "is_running", lambda: True)():
+                self._pick_camera()  # don't calibrate on a camera index that won't open
             self.vision.start()
             self.active["phase"] = "calibration"
             self.active["calibration_start_ts"] = time.time()
