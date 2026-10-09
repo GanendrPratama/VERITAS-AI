@@ -20,6 +20,12 @@ if (-not (Test-Path $streamlit)) {
 
 New-Item -ItemType Directory -Force -Path "logs" | Out-Null
 
+# A second start would truncate the logs and run a duplicate supervisor/orchestrator next to the live one.
+$busy = Get-NetTCPConnection -State Listen -LocalPort 8000, 8501 -ErrorAction SilentlyContinue
+if ($busy) {
+    throw "already running (port(s) $(($busy.LocalPort | Sort-Object -Unique) -join ', ') in use) -- run scripts\stop.ps1 first"
+}
+
 Start-Process -FilePath $python -ArgumentList @("-u", "scripts\supervise.py") `
     -WorkingDirectory $root `
     -WindowStyle Hidden `

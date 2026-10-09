@@ -47,6 +47,7 @@ def fake_call_agent(host, model, prompt, validate=None, keep_alive=None, max_tok
 def start_server(logs_dir):
     orchestrator.llm.call_agent = fake_call_agent
     orchestrator.Orchestrator._capture_answer = lambda self, wav_path: ("saya ada di rumah", False)
+    orchestrator._build_vision = orchestrator._NullHardwareService  # don't switch the real webcam on and off
 
     server = orchestrator.ThreadingHTTPServer(
         ("127.0.0.1", 0), orchestrator.make_handler(orchestrator.Orchestrator(logs_dir=logs_dir))

@@ -94,7 +94,7 @@ def landing_screen(state):
             if post("/sessions", data=pdf.getvalue()) is not None:
                 st.rerun()
 
-    if (state or {}).get("phase", "idle") == "idle":  # camera can't be switched mid-interview
+    if (state or {}).get("phase", "idle") in ("idle", "stopped"):  # camera can't be switched mid-interview
         with st.expander("Test webcam and microphone"):
             camera_panel()
             device_panel()
@@ -144,8 +144,9 @@ def camera_panel():
         st.warning("No camera detected.")
         return
     sel = cams["selected"] if cams["selected"] in cams["cameras"] else cams["cameras"][0]
+    notes = cams.get("notes") or {}
     pick = st.selectbox("Camera", cams["cameras"], index=cams["cameras"].index(sel),
-                        format_func=lambda i: f"Camera {i}")
+                        format_func=lambda i: f"Camera {i}" + (f" ({notes[str(i)]})" if notes.get(str(i)) else ""))
     if st.session_state.get("cam_started") != pick:
         st.session_state["cam_started"] = pick
         post("/camera", data=str(pick))

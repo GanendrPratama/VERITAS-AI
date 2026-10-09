@@ -61,14 +61,62 @@ def open_camera(index):
     return cv2.VideoCapture(index, CAP_BACKEND)
 
 
+CAMERA_NOTES = {
+    "black": "black image -- lens covered or privacy shutter closed?",
+    "static": "frozen image -- a virtual camera (e.g. OBS) that isn't streaming?",
+}
+
+
+def frame_kind(frames):
+    """frames: consecutive BGR frames from one camera -> "ok" | "black" | "static".
+    A real sensor always has some pixel noise; a virtual camera's placeholder doesn't."""
+    import numpy as np
+
+    if max(int(f.max()) for f in frames) < 16:
+        return "black"
+    if len(frames) > 1 and all(np.array_equal(a, b) for a, b in zip(frames, frames[1:])):
+        return "static"
+    return "ok"
+
+
+def probe_camera(index, n_frames=6):
+    """None if the camera won't open or deliver frames, else its frame_kind()."""
+    cap = open_camera(index)
+    try:
+        if not cap.isOpened():
+            return None
+        frames = []
+        for _ in range(n_frames):
+            ok, frame = cap.read()
+            if ok:
+                frames.append(frame)
+            time.sleep(0.05)
+        return frame_kind(frames) if frames else None
+    finally:
+        cap.release()
+
+
 def list_cameras(max_index=5):
+    """[{"index": i, "kind": "ok" | "black" | "static"}] for every camera that opens."""
     found = []
     for i in range(max_index):
-        cap = open_camera(i)
-        if cap.isOpened():
-            found.append(i)
-        cap.release()
+        kind = probe_camera(i)
+        if kind is not None:
+            found.append({"index": i, "kind": kind})
     return found
+
+
+def pick_camera(cameras, preferred):
+    """Keep `preferred` if it opens and isn't a frozen virtual camera; otherwise the first
+    working camera, then a real-but-dark one, then anything. None if nothing opens."""
+    by_index = {c["index"]: c["kind"] for c in cameras}
+    if by_index.get(preferred) in ("ok", "black"):
+        return preferred
+    for kind in ("ok", "black", "static"):
+        for c in cameras:
+            if c["kind"] == kind:
+                return c["index"]
+    return None
 
 
 def _make_detector(device):
@@ -120,6 +168,7 @@ class VisionService:
         self._thread = None
         self._last_detect_error = None
         self.latest_jpeg = None  # newest camera frame, for the UI preview
+        self.frame_note = None  # why the live frames are useless (black / frozen), shown in health
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
@@ -128,6 +177,7 @@ class VisionService:
         if self.is_running():
             return  # already capturing (e.g. started at camera selection)
         self.error = None
+        self.frame_note = None
         self._stop_event = threading.Event()  # fresh event so a lingering old thread can't be revived
         self._thread = threading.Thread(target=self._run, args=(self._stop_event,), daemon=True)
         self._thread.start()
@@ -140,7 +190,7 @@ class VisionService:
     def _run(self, stop_event):
         cap = open_camera(self.camera_index)
         if not cap.isOpened():
-            self.error = f"camera index {self.camera_index} won't open"
+            self.error = f"camera {self.camera_index} won't open -- pick another in the camera list"
             cap.release()
             return
 
@@ -157,10 +207,13 @@ class VisionService:
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 frame_path = str(Path(tmp) / "frame.jpg")
+                recent = []
                 while not stop_event.is_set():
                     ok, frame = cap.read()
                     if ok:
                         self.latest_jpeg = cv2.imencode(".jpg", frame)[1].tobytes()
+                        recent = (recent + [frame])[-5:]
+                        self.frame_note = CAMERA_NOTES.get(frame_kind(recent)) if len(recent) == 5 else None
                         if "detector" in loaded:
                             self._detect_frame(loaded["detector"], frame, frame_path)
                     time.sleep(0.2)  # ~5 fps -- AU intensity doesn't need more
@@ -216,6 +269,21 @@ def _selfcheck():
     assert abs(deltas["AU04"] - 3.0) < 1e-9, deltas
 
     assert delta_sd_from_window([], baseline) == {"AU04": None}
+
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    noisy = [rng.integers(0, 255, (4, 4, 3), dtype="uint8") for _ in range(3)]
+    assert frame_kind(noisy) == "ok"
+    assert frame_kind([np.full((4, 4, 3), 3, dtype="uint8")] * 3) == "black"
+    assert frame_kind([np.full((4, 4, 3), 120, dtype="uint8")] * 3) == "static"
+
+    cams = [{"index": 0, "kind": "black"}, {"index": 1, "kind": "static"}, {"index": 2, "kind": "ok"}]
+    assert pick_camera(cams, 7) == 2  # stale/unknown index -> first working camera
+    assert pick_camera(cams, 0) == 0  # a real camera with its shutter closed is kept
+    assert pick_camera(cams, 1) == 2  # frozen virtual camera is skipped
+    assert pick_camera(cams[:2], 7) == 0
+    assert pick_camera([], 0) is None
 
     # a face-less frame (NaN AUs) is skipped, not recorded
     class FakeResult:
