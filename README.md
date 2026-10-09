@@ -64,9 +64,16 @@ The dashboard and orchestrator are separate processes that only talk over
 that local HTTP API — either can be restarted without killing the other.
 
 `start.sh` / `start.ps1` run the orchestrator under `scripts/supervise.py`, which restarts it
-if it ever exits (backoff 2s → 30s; each restart is logged to `logs/orchestrator.log`). A
+if it ever exits (backoff 2s → 30s; each restart is logged to `logs/orchestrator.log`). It
+also restarts it if it hangs: `GET /ping` silent for 30s (process frozen), or `GET /state`
+blocked for 5 minutes (a request stuck holding the session lock). A
 session that was open resumes automatically (calibration baselines are not saved, so an
 interview resumed mid-way has no arousal signal).
+
+The supervisor probes `GET /state` every 5s with the dashboard's 5s timeout and logs the
+result per minute to `logs/uptime.jsonl`. `python scripts/uptime.py [--days N]` prints the
+availability per day and overall against the 98% target, plus restarts by cause. Time
+with the system stopped via `stop.sh` / `stop.ps1` is not counted.
 
 Stop both with `scripts/stop.sh` (Linux/macOS) or `scripts\stop.ps1`
 (Windows). They kill the whole process trees, escalate to a force-kill, and
@@ -161,6 +168,7 @@ Ollama, or GPU:
 python tests/test_fusion.py
 python tests/test_stoplogic.py
 python tests/test_orchestrator_api.py   # monkeypatches the Analyst/Interviewer/mic calls
+python tests/test_supervise.py          # watchdog restarts + uptime log, with a stand-in orchestrator
 python services/llm.py
 python services/stt.py
 python services/sensors.py

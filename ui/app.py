@@ -43,6 +43,7 @@ h1,h2,h3{letter-spacing:0}
 </style>""", unsafe_allow_html=True)
 
 STEPS = ["Document", "Claims", "Interview", "Results"]
+SLOW_TIMEOUTS = {"/generate-question": 180}  # up to two 60s Interviewer tries, with margin
 
 
 def post(path, data=None, timeout=120):  # slow actions (LLM, STT, camera restart) share this; refused connections still fail instantly
@@ -227,11 +228,12 @@ def control_panel(state):
         ]:
             if label == "Generate Question":
                 typed = st.text_area("Typed answer (only if mic/STT unavailable)", key="typed_answer")
-                if st.button("Stop", key="stop_rec") and post("/record/stop", data=typed.encode("utf-8")) is not None:
+                # STT (CPU fallback on a long answer) + up to two 60s Analyst tries
+                if st.button("Stop", key="stop_rec") and post("/record/stop", data=typed.encode("utf-8"), timeout=300) is not None:
                     st.session_state["typed_answer"] = ""
                     st.rerun()
             # Rerun only on success -- a rerun would wipe the error post() just showed.
-            if st.button(label, type=kind) and post(path) is not None:
+            if st.button(label, type=kind) and post(path, timeout=SLOW_TIMEOUTS.get(path, 120)) is not None:
                 st.rerun()
 
     @st.fragment(run_every="1s")
