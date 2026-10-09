@@ -27,6 +27,7 @@ import shutil
 import threading
 import time
 import tomllib
+import traceback
 os.environ.setdefault("TQDM_DISABLE", "1")  # py-feat's per-frame progress bars flood the log and bury real errors
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -121,7 +122,9 @@ class Orchestrator:
         self.logs_dir = Path(logs_dir)
         self.config = config
         self.active = None
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()  # guards self.active; never held across an LLM or STT call
+        self._busy = None  # the slow turn action (LLM/STT) running outside the lock, if any
+        self._pending_answer = None  # (session_id, answer, unclear) kept when the Analyst fails, for a retry
         self.sensors = _build_sensors()
         self.vision = _build_vision()
         self._camera_list = []
@@ -311,8 +314,8 @@ class Orchestrator:
         return {"cameras": self._camera_list, "selected": getattr(self.vision, "camera_index", None)}
 
     def live(self):
-        """Latest readings from every stream. Lock-free on purpose: record_stop holds
-        self.lock through STT/LLM calls, and the live view must keep updating then."""
+        """Latest readings from every stream. Lock-free: it only reads the services'
+        sample buffers, never self.active."""
 
         def latest(svc):
             out = {}
@@ -460,6 +463,8 @@ class Orchestrator:
                 raise OrchestratorError(f"cannot record during phase {self.active['phase']}")
             if self.active["recording"]:
                 raise OrchestratorError("already recording")
+            self._require_idle()
+            self._pending_answer = None
             try:
                 self.recorder.start()
                 self._start_captions()
@@ -469,31 +474,65 @@ class Orchestrator:
             self.active["record_start_ts"] = time.time()
             self._save()
 
+    def _require_idle(self):
+        if self._busy:
+            raise OrchestratorError(f"still working on {self._busy} -- wait for it to finish")
+
+    def _begin_slow(self, name):
+        """Call with self.lock held. Marks a slow action as running so the lock can be
+        released for its LLM/STT call while other turn actions are refused."""
+        self._require_idle()
+        self._busy = name
+        return self.active
+
+    def _still_current(self, session):
+        """Call with self.lock held, after a slow call: the session it started on is still
+        the active one (not replaced by create/open/delete, or stopped, meanwhile)."""
+        return self.active is session and session["phase"] != "stopped"
+
     def record_stop(self, typed_answer=None):
-        """typed_answer: operator-typed text used instead of mic+STT (partial setups)."""
+        """typed_answer: operator-typed text used instead of mic+STT (partial setups).
+
+        self.lock is only held to read and to apply state -- STT and the Analyst call run
+        without it, so /state, /health and the dashboard keep answering meanwhile."""
         with self.lock:
             self._require_active()
             if not self.active["recording"]:
                 raise OrchestratorError("not recording")
+            session = self._begin_slow("the answer")
             self._caption_stop.set()
-            record_start_ts = self.active["record_start_ts"]
-            record_end_ts = time.time()
-
-            wav_path = self._session_path(self.active["session_id"]).parent / f"turn_{self.active['question_count']}.wav"
+            wav_path = self._session_path(session["session_id"]).parent / f"turn_{session['question_count']}.wav"
+            pending = self._pending_answer if self._pending_answer and self._pending_answer[0] == session["session_id"] else None
+            assess = session["phase"] == "interview"
+            ctx = self._analyst_context(session) if assess else None
+        try:
             if typed_answer:
                 try:
                     self.recorder.stop(str(wav_path))  # release the mic if it did start
                 except Exception:
                     pass
                 answer_text, unclear = typed_answer, False
+            elif pending:
+                _, answer_text, unclear = pending  # the Analyst failed last time; the mic already stopped
             else:
                 # raises (staying in "recording") if there's no audio, so the operator can retry typed
                 answer_text, unclear = self._capture_answer(wav_path)
-            self.active["recording"] = False
-
-            if self.active["phase"] == "interview":
-                self._assess_answer(answer_text, unclear, record_start_ts, record_end_ts)
-            self._save()
+            if assess:
+                try:
+                    response = self._call_analyst(ctx, answer_text, unclear)
+                except OrchestratorError:
+                    self._pending_answer = (session["session_id"], answer_text, unclear)
+                    raise
+            with self.lock:
+                if not self._still_current(session):
+                    raise OrchestratorError("the session changed while the answer was processed -- answer discarded")
+                session["recording"] = False
+                self._pending_answer = None
+                if assess:
+                    self._apply_assessment(ctx, response, answer_text)
+                self._save()
+        finally:
+            self._busy = None
 
     def _capture_answer(self, wav_path):
         try:
@@ -549,60 +588,70 @@ class Orchestrator:
             if not stop.is_set():
                 self.stt_status["partial"] = text
 
-    def _assess_answer(self, answer_text, unclear, start_ts, end_ts):
+    def _analyst_context(self, session):
+        """Everything the Analyst call needs, snapshotted while self.lock is held."""
+        start_ts, end_ts = session["record_start_ts"], time.time()
         deltas = {}
         deltas.update(self.sensors.delta_sd(start_ts, end_ts))
         deltas.update(self.vision.delta_sd(start_ts, end_ts))
-        arousal = fusion.bucket_arousal(deltas, self.config)
+        claim_id = session["current_claim_id"]
+        return {
+            "session": session,
+            "arousal": fusion.bucket_arousal(deltas, self.config),
+            "claim_id": claim_id,
+            "claim_text": session["ledger"][claim_id]["text"] if claim_id in session["ledger"] else None,
+            "history": llm.trim_history(list(session["transcript"]), self.config["llm_context_turns"]),
+            "report_text": session["report_text"],
+            "question": session["current_question"],
+        }
 
-        claim_id = self.active["current_claim_id"]
-        claim_text = self.active["ledger"][claim_id]["text"] if claim_id else None
-        history = llm.trim_history(self.active["transcript"], self.config["llm_context_turns"])
-
+    def _call_analyst(self, ctx, answer_text, unclear):
         if unclear:
-            response = {"state": "evasive", "plausibility": "non_answer",
-                        "reasoning": "answer unclear (STT)", "new_claim_text": None}
-        else:
-            prompt = llm.build_analyst_prompt(
-                ANALYST_TEMPLATE, self.active["report_text"], claim_text, history, answer_text, arousal
+            return {"state": "evasive", "plausibility": "non_answer",
+                    "reasoning": "answer unclear (STT)", "new_claim_text": None}
+        prompt = llm.build_analyst_prompt(
+            ANALYST_TEMPLATE, ctx["report_text"], ctx["claim_text"], ctx["history"], answer_text, ctx["arousal"]
+        )
+        try:
+            return llm.call_agent(
+                self.config["ollama_host"], self.config["model"], prompt,
+                validate=llm.validate_analyst_response,
+                keep_alive=self.config["llm_keep_alive"], max_tokens=self.config["llm_max_tokens"],
             )
-            try:
-                response = llm.call_agent(
-                    self.config["ollama_host"], self.config["model"], prompt,
-                    validate=llm.validate_analyst_response,
-                    keep_alive=self.config["llm_keep_alive"], max_tokens=self.config["llm_max_tokens"],
-                )
-            except Exception as e:
-                raise OrchestratorError(f"Analyst call failed: {e}", status=502)
+        except Exception as e:
+            raise OrchestratorError(f"Analyst call failed: {e} -- press Stop again to retry", status=502)
 
-        if claim_id:
-            claim = self.active["ledger"][claim_id]
+    def _apply_assessment(self, ctx, response, answer_text):
+        """Call with self.lock held."""
+        active, arousal, claim_id = ctx["session"], ctx["arousal"], ctx["claim_id"]
+        if claim_id in active["ledger"]:
+            claim = active["ledger"][claim_id]
             claim["state"] = response["state"]
             claim["turns"].append({"arousal": arousal})
         elif response.get("new_claim_text"):
             new_id = self._next_claim_id()
-            self.active["ledger"][new_id] = {
+            active["ledger"][new_id] = {
                 "text": response["new_claim_text"], "state": response["state"],
                 "turns": [{"arousal": arousal}],
             }
 
-        self.active["transcript"].append({"question": self.active["current_question"], "answer": answer_text})
-        self.active["current_question"] = None
-        self.active["current_claim_id"] = None
+        active["transcript"].append({"question": ctx["question"], "answer": answer_text})
+        active["current_question"] = None
+        active["current_claim_id"] = None
 
-        confidence, flagged, cleared = fusion.update_confidence(self.active["ledger"], self.config)
-        self.active["confidence"] = confidence
-        self.active["flagged_claims"] = flagged
-        self.active["cleared_claims"] = cleared
-        self.active["confidence_history"].append(confidence)
+        confidence, flagged, cleared = fusion.update_confidence(active["ledger"], self.config)
+        active["confidence"] = confidence
+        active["flagged_claims"] = flagged
+        active["cleared_claims"] = cleared
+        active["confidence_history"].append(confidence)
 
-        elapsed_minutes = (time.time() - self.active["interview_start_ts"]) / 60
+        elapsed_minutes = (time.time() - active["interview_start_ts"]) / 60
         stop, reason = stoplogic.should_stop(
-            self.active["ledger"], confidence, self.active["confidence_history"],
-            self.active["question_count"], elapsed_minutes, operator_override=False, config=self.config,
+            active["ledger"], confidence, active["confidence_history"],
+            active["question_count"], elapsed_minutes, operator_override=False, config=self.config,
         )
-        self.active["stop_recommended"] = stop
-        self.active["stop_reason"] = reason
+        active["stop_recommended"] = stop
+        active["stop_reason"] = reason
 
     def generate_question(self):
         with self.lock:
@@ -618,12 +667,13 @@ class Orchestrator:
                 raise OrchestratorError(
                     f"stop condition met ({self.active['stop_reason']}) -- use Stop Interview", status=409
                 )
-
-            history = llm.trim_history(self.active["transcript"], self.config["llm_context_turns"])
+            session = self._begin_slow("the next question")
+            history = llm.trim_history(list(session["transcript"]), self.config["llm_context_turns"])
             prompt = llm.build_interviewer_prompt(
-                INTERVIEWER_TEMPLATE, self.active["report_text"], self.active["ledger"], history
+                INTERVIEWER_TEMPLATE, session["report_text"], session["ledger"], history
             )
-            valid_ids = set(self.active["ledger"].keys())
+            valid_ids = set(session["ledger"].keys())
+        try:  # self.lock is released for the LLM call, which can take many seconds
             try:
                 response = llm.call_agent(
                     self.config["ollama_host"], self.config["model"], prompt,
@@ -632,11 +682,15 @@ class Orchestrator:
                 )
             except Exception as e:
                 raise OrchestratorError(f"Interviewer call failed: {e}", status=502)
-
-            self.active["question_count"] += 1
-            self.active["current_question"] = response["question"]
-            self.active["current_claim_id"] = response["claim_id"]
-            self._save()
+            with self.lock:
+                if not self._still_current(session):
+                    raise OrchestratorError("the session changed while the question was generated -- question discarded")
+                session["question_count"] += 1
+                session["current_question"] = response["question"]
+                session["current_claim_id"] = response["claim_id"]
+                self._save()
+        finally:
+            self._busy = None
 
     def stop_interview(self):
         with self.lock:
@@ -683,7 +737,7 @@ def make_handler(orch):
             length = int(self.headers.get("Content-Length", 0))
             return self.rfile.read(length) if length else b""
 
-        def do_GET(self):
+        def _get(self):
             if self.path == "/ping":  # lock-free liveness check for scripts/supervise.py
                 self._send_json(200, {"ok": True})
             elif self.path == "/state":
@@ -716,7 +770,7 @@ def make_handler(orch):
             else:
                 self._send_json(404, {"error": "not found"})
 
-        def do_DELETE(self):
+        def _delete(self):
             match = re.fullmatch(r"/sessions/([^/]+)", self.path)
             if not match:
                 self._send_json(404, {"error": "not found"})
@@ -727,7 +781,7 @@ def make_handler(orch):
             except OrchestratorError as e:
                 self._send_json(e.status, {"error": str(e)})
 
-        def do_POST(self):
+        def _post(self):
             try:
                 if self.path == "/sessions":
                     pdf_bytes = self._read_body()
@@ -742,6 +796,8 @@ def make_handler(orch):
                     try:
                         texts = json.loads(body)
                     except json.JSONDecodeError:
+                        texts = None
+                    if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
                         self._send_json(400, {"error": "expected a JSON list of claim strings"})
                         return
                     self._send_json(200, orch.add_claims(texts))
@@ -789,6 +845,24 @@ def make_handler(orch):
                 self._send_json(200, orch.get_state())
             except OrchestratorError as e:
                 self._send_json(e.status, {"error": str(e)})
+
+        def _guarded(self, handler):
+            """An unexpected exception is logged and answered as a JSON 500 instead of
+            dropping the connection, so the UI can show the reason."""
+            try:
+                handler()
+            except Exception as e:
+                traceback.print_exc()
+                self._send_json(500, {"error": f"internal error: {type(e).__name__}: {e}"})
+
+        def do_GET(self):
+            self._guarded(self._get)
+
+        def do_POST(self):
+            self._guarded(self._post)
+
+        def do_DELETE(self):
+            self._guarded(self._delete)
 
         def log_message(self, fmt, *args):
             pass  # state changes already print in the Orchestrator methods above

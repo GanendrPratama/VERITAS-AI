@@ -12,10 +12,10 @@ Recorder captures the mic between the operator's Record/Stop clicks (Section
 """
 import wave
 
-from faster_whisper import WhisperModel
-
 
 def load_model(model_size="small", device="cuda", compute_type=None):
+    from faster_whisper import WhisperModel  # lazy: the orchestrator must start (typed answers) without it
+
     compute_type = compute_type or ("float16" if device == "cuda" else "int8")
     try:
         return WhisperModel(model_size, device=device, compute_type=compute_type)
@@ -111,7 +111,9 @@ class Recorder:
         import numpy as np
 
         self._recording = False
-        audio = np.concatenate(self._frames, axis=0) if self._frames else np.zeros((0, 1), dtype="int16")
+        if not self._frames:  # no mic, or it never delivered a block: nothing worth transcribing
+            raise RuntimeError("no audio captured")
+        audio = np.concatenate(self._frames, axis=0)
         self._frames = []
         write_wav(out_path, audio, self.samplerate)
         return out_path

@@ -1,0 +1,8 @@
+# The dashboard's CSS (ui/app.py) paints a dark background; without a dark base theme
+# Streamlit keeps its light-theme text colours, so labels and metric captions vanish.
+[theme]
+base = "dark"
+backgroundColor = "#07111f"
+secondaryBackgroundColor = "#0b1a2c"
+textColor = "#eaf2fb"
+primaryColor = "#54d7c7"
