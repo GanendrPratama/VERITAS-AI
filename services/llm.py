@@ -115,6 +115,10 @@ def validate_interviewer_response(data, valid_claim_ids):
     if not data.get("question"):
         raise ValueError("missing question")
     claim_id = data.get("claim_id")
+    if claim_id is None:
+        # qwen2.5 often answers {"type": "deepen", "claim_id": null} (~half the time on a live
+        # run); rejecting that killed the interview. A question tied to no claim is a new-claim.
+        data["type"] = "new-claim"
     if data["type"] == "new-claim":
         if claim_id is not None:
             raise ValueError("new-claim must have claim_id=null")
@@ -160,6 +164,9 @@ if __name__ == "__main__":
 
     validate_interviewer_response({"type": "deepen", "claim_id": "c1", "question": "?"}, {"c1"})
     validate_interviewer_response({"type": "new-claim", "claim_id": None, "question": "?"}, {"c1"})
+    loose = {"type": "deepen", "claim_id": None, "question": "?"}
+    validate_interviewer_response(loose, {"c1"})
+    assert loose["type"] == "new-claim", loose
     try:
         validate_interviewer_response({"type": "deepen", "claim_id": "nope", "question": "?"}, {"c1"})
         assert False, "should have raised"
