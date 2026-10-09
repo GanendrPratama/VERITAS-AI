@@ -935,7 +935,19 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = sys.platform != "win32"
 
 
+def _preload_native_libs():
+    """Import torch/py-feat and sounddevice on the main thread before serving. Imported lazily
+    from the vision thread while a /health request imported sounddevice, torch's DLL init failed
+    (WinError 1114) and the retry crashed the process with an access violation."""
+    for name in ("sounddevice", "feat"):
+        try:
+            __import__(name)
+        except Exception as e:
+            print(f"[orchestrator] preloading {name} failed: {type(e).__name__}: {e}")
+
+
 def serve(host="127.0.0.1", port=8000):
+    _preload_native_libs()
     orch = Orchestrator()
     server = Server((host, port), make_handler(orch))
     print(f"[orchestrator] API listening on http://{host}:{port}")
