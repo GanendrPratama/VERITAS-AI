@@ -87,6 +87,18 @@ BLE (`services/sensors.py`) + webcam (`services/vision.py`) capture. Any
 missing piece — no Ollama, no mic, no ESP32, no camera — degrades to
 "unavailable" for that channel rather than crashing (design doc Section 4).
 
+Webcam micro-expressions: MediaPipe Face Landmarker (`vision_model = "mediapipe"`,
+about 10 ms a frame on a laptop CPU) analyses every camera frame, and each answer
+gets a `micro` channel: the strongest brief (at most 0.5 s) brow-lowerer /
+lid-tightener / lip-press spike against the calibration baseline. The model file
+(3.6 MB) downloads into `~/.cache/veritas-ai/` on first start. Set
+`vision_model = "pyfeat"` for the old py-feat model. To check capture on a recorded
+face video instead of a webcam:
+
+```bash
+python scripts/micro_bench.py path/to/face.mp4
+```
+
 ESP32 firmware: `esp32/VERITAS/` (Section 9, Open decision #8) — implements
 the BLE profile `services/sensors.py` expects, but untested on real hardware
 from this machine.
@@ -169,9 +181,10 @@ python tests/test_fusion.py
 python tests/test_stoplogic.py
 python tests/test_orchestrator_api.py   # monkeypatches the Analyst/Interviewer/mic calls
 python tests/test_supervise.py          # watchdog restarts + uptime log, with a stand-in orchestrator
+python tests/test_micro_expressions.py  # brief AU spikes reach the arousal bucket, scripted face model
 python services/llm.py
 python services/stt.py
 python services/sensors.py
-python services/vision.py               # baseline/delta math only, no camera needed
+python services/vision.py               # baseline/delta/micro-expression math only, no camera needed
 python services/docconvert.py           # PDF->Markdown, falls back to pypdf if markitdown is missing
 ```

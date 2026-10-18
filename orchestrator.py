@@ -83,7 +83,7 @@ def _build_vision():
     try:
         from services.vision import VisionService
 
-        return VisionService(CONFIG["camera_index"], CONFIG["vision_device"])
+        return VisionService(CONFIG["camera_index"], CONFIG["vision_device"], CONFIG.get("vision_model", "mediapipe"))
     except ImportError:
         return _NullHardwareService()
 
@@ -308,7 +308,7 @@ class Orchestrator:
         ble_ok = getattr(self.sensors, "is_connected", lambda: True)()
         esp = stream(self.sensors, "bleak not installed", "connects when calibration starts",
                      None if ble_ok else "no_ble")
-        cam = stream(self.vision, "py-feat / opencv not installed", "starts with calibration")
+        cam = stream(self.vision, "face model / opencv not installed", "starts with calibration")
 
         try:
             import sounddevice as sd
