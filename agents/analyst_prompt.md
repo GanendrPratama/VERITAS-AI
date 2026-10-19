@@ -23,8 +23,9 @@ Decide:
 - `reasoning`: one sentence, grounded only in REPORT/TRANSCRIPT/ANSWER -- no
   speculation, no outside facts.
 - `new_claim_text`: only meaningful when CLAIM was `(none -- identify a new
-  claim)` -- the specific new checkable claim the answer reveals, or `null` if
-  it reveals nothing new.
+  claim)` -- the specific new checkable claim the answer reveals, written as
+  one short sentence in Indonesian (Bahasa Indonesia), or `null` if it
+  reveals nothing new.
 
 Respond with ONLY this JSON, no other text:
 
