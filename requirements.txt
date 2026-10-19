@@ -6,4 +6,5 @@ faster-whisper
 bleak
 sounddevice
 opencv-python-headless
+mediapipe
 py-feat

@@ -21,7 +21,8 @@ stt_device = "cuda"
 stt_language = "id"  # Whisper language code for answers; "" = auto-detect
 ollama_host = "http://localhost:11434"
 
-vision_device = "cuda"
+vision_model = "mediapipe"  # "mediapipe" (fast, CPU, every frame) or "pyfeat" (slow on CPU)
+vision_device = "cuda"  # py-feat only; MediaPipe always runs on the CPU
 camera_index = 0
 mic_samplerate = 16000
 
