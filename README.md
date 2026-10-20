@@ -183,6 +183,7 @@ python tests/test_orchestrator_api.py   # monkeypatches the Analyst/Interviewer/
 python tests/test_supervise.py          # watchdog restarts + uptime log, with a stand-in orchestrator
 python tests/test_micro_expressions.py  # brief AU spikes reach the arousal bucket, scripted face model
 python tests/test_sensors.py            # heart-rate-only ESP32-C3 still streams over BLE, faked bleak
+python tests/test_mic_select.py         # the picked microphone survives a restart, matched by name
 python services/llm.py
 python services/stt.py
 python services/sensors.py

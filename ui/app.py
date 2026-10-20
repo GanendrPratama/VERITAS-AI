@@ -124,8 +124,7 @@ def landing_screen(state):
                         st.rerun()
 
 
-@st.fragment(run_every="1s")
-def camera_preview():
+def show_frame():
     try:
         resp = requests.get(f"{ORCH_URL}/camera/frame", timeout=2)
     except requests.exceptions.RequestException:
@@ -134,6 +133,11 @@ def camera_preview():
         st.image(resp.content, use_container_width=True)
     else:
         st.caption("No frame yet -- camera still opening, or it failed (see Component Status).")
+
+
+@st.fragment(run_every="1s")
+def camera_preview():
+    show_frame()
 
 
 def camera_panel():
@@ -154,22 +158,28 @@ def camera_panel():
         camera_preview()
 
 
+def mic_picker(dev, key="mic_pick", disabled=False):
+    """Microphone selector, applied immediately. The orchestrator remembers the pick
+    (logs/mic.json), so it survives a page reload and an orchestrator restart."""
+    mics = {m["index"]: m["name"] for m in dev["mics"]}
+    if not mics:
+        st.warning("No microphone detected.")
+        return
+    ids = list(mics)
+    cur = dev["mic_selected"] if dev["mic_selected"] in mics else ids[0]
+    pick = st.selectbox("Microphone", ids, index=ids.index(cur), format_func=mics.get, key=key, disabled=disabled,
+                        help="Can't be changed while recording. First entry is used if the system default isn't listed")
+    if pick != dev["mic_selected"] and st.session_state.get(f"{key}_applied") != pick:
+        st.session_state[f"{key}_applied"] = pick
+        post("/devices", data=json.dumps({"mic": pick}))
+
+
 def device_panel():
-    """Microphone and compute-device pickers (applied immediately, for this run only)."""
+    """Microphone and compute-device pickers (applied immediately)."""
     dev = get("/devices")
     if dev is None:
         return
-    mics = {m["index"]: m["name"] for m in dev["mics"]}
-    if mics:
-        ids = list(mics)
-        cur = dev["mic_selected"] if dev["mic_selected"] in mics else ids[0]
-        pick = st.selectbox("Microphone", ids, index=ids.index(cur), format_func=mics.get,
-                            key="mic_pick", help="First entry is used if the system default isn't listed")
-        if pick != dev["mic_selected"] and st.session_state.get("mic_applied") != pick:
-            st.session_state["mic_applied"] = pick
-            post("/devices", data=json.dumps({"mic": pick}))
-    else:
-        st.warning("No microphone detected.")
+    mic_picker(dev)
     c1, c2 = st.columns(2)
     for col, key, label in [(c1, "stt_device", "Speech-to-text runs on"), (c2, "vision_device", "Face model runs on")]:
         opts = ["cuda", "cpu"]
@@ -221,12 +231,62 @@ def claims_step(state):
         st.rerun()
 
 
+@st.fragment(run_every="1s")
+def interview_live():
+    """The interview's main view: question, confidence, camera, heart rate and speech-to-text together."""
+    state, live = get("/state"), get("/live")
+    if not state or not state.get("session_id") or live is None:
+        st.warning("Orchestrator unreachable -- dashboard will keep retrying.")
+        return
+
+    q_col, conf_col = st.columns([3, 1])
+    with q_col:
+        st.caption(f"Current question · {state['phase']}" + (" · RECORDING" if state["recording"] else ""))
+        st.subheader(state["current_question"] or "—")
+    with conf_col:
+        st.metric("Confidence", f"{state['confidence']:+.2f}")
+        if state["stop_recommended"]:
+            st.warning("Stop recommended")
+
+    cam, heart, speech = st.columns([2, 1, 2])
+    with cam:
+        st.caption("Camera")
+        show_frame()
+        v = live["vision"]
+        st.caption(f"face model: {v['device'] or 'loading / off'}" + (f" -- {v['error']}" if v["error"] else ""))
+    with heart:
+        st.caption("Heartbeat")
+        hr = live["sensors"].get("hr")
+        st.metric("Heart rate", f"{hr['value']:.0f} bpm" if hr else "—", help=f"{hr['age']}s ago" if hr else "no data from the ESP32 sensor")
+        gsr = live["sensors"].get("gsr")
+        if gsr:
+            st.metric("GSR", f"{gsr['value']:.0f}", help=f"{gsr['age']}s ago")
+    with speech:
+        t, mic = live["stt"], live["mic"]
+        st.caption("Speech-to-text" + (f" · {t['state']}" if t["state"] else "") + (f" ({t['device']})" if t["device"] else ""))
+        if state["recording"]:
+            st.info(f"🎙 {t['partial']}" if t["partial"] else "🎙 Listening…")
+        elif t["last_text"]:
+            st.write(f"“{t['last_text']}”")
+        else:
+            st.write("—")
+        if t["error"]:
+            st.caption(t["error"])
+        st.progress(mic["level"])
+        st.caption(mic["error"] or mic["device"] or "microphone opening...")
+
+
 def control_panel(state):
     if state["phase"] == "idle":
         claims_step(state)
         return
 
     st.markdown('<div class="kicker">Stage 03 / Live Session</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        interview_live()
+        dev = get("/devices")
+        if dev is not None:
+            mic_picker(dev, key="mic_pick_interview", disabled=state["recording"])
     col_controls, col_state = st.columns([1, 2])
 
     with col_controls:
@@ -257,16 +317,6 @@ def control_panel(state):
             st.warning("Orchestrator unreachable -- dashboard will keep retrying.")
             return
 
-        st.metric("Phase", state["phase"])
-        st.metric("Recording", "yes" if state["recording"] else "no")
-        st.metric("Confidence", f"{state['confidence']:+.2f}")
-        if state["stop_recommended"]:
-            st.warning("Stop recommended")
-
-        st.write("**Current question:**", state["current_question"] or "—")
-        if state["recording"]:
-            caption = ((get("/live") or {}).get("stt") or {}).get("partial")
-            st.info(f"🎙 {caption}" if caption else "🎙 Listening…")
         st.write("**Flagged claims:**", state["flagged_claims"] or "none")
         st.write("**Cleared claims:**", state["cleared_claims"] or "none")
         st.write("**Ledger:**")
@@ -412,5 +462,6 @@ elif step == 2:
     control_panel(state)
 else:
     results_step(state)
-live_monitor()
+if step != 2:  # the interview view already shows these streams
+    live_monitor()
 log_viewer()
