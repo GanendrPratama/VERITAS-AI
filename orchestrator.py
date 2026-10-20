@@ -135,6 +135,7 @@ class Orchestrator:
         self._stt_lock = threading.Lock()  # one transcription at a time: live captions vs the final pass
         self._caption_stop = threading.Event()
         self.stt_status = {"state": "idle", "device": None, "last_text": None, "partial": "", "error": None}
+        self._restore_mic()
         self._resume()
 
     # -- persistence --
@@ -459,6 +460,21 @@ class Orchestrator:
             "stt_device": self._stt_device, "vision_device": getattr(self.vision, "requested_device", None),
         }
 
+    def _mic_pref_path(self):
+        return self.logs_dir / "mic.json"
+
+    def _restore_mic(self):
+        """Reopen the microphone the operator last picked, so a restart doesn't fall back to the
+        system default. Matched by name first: indices shift when devices are plugged in or out."""
+        try:
+            pref = json.loads(self._mic_pref_path().read_text())
+            inputs = dict(stt.list_inputs())
+        except Exception:
+            return  # no saved pick, or no audio stack here
+        index = next((i for i, n in inputs.items() if n == pref.get("name")), None)
+        if index is not None:  # that mic is unplugged: stay on the system default
+            self.recorder.set_device(index)
+
     def set_devices(self, changes):
         with self.lock:
             if self.active and self.active["recording"]:
@@ -468,6 +484,12 @@ class Orchestrator:
                     self.recorder.set_device(changes["mic"])
                 except Exception as e:
                     raise OrchestratorError(f"couldn't switch microphone: {e}")
+                try:
+                    name = dict(stt.list_inputs()).get(changes["mic"])
+                    self.logs_dir.mkdir(parents=True, exist_ok=True)
+                    self._mic_pref_path().write_text(json.dumps({"index": changes["mic"], "name": name}))
+                except Exception as e:
+                    print(f"[orchestrator] couldn't remember the microphone choice: {e}")
             if "stt_device" in changes:
                 self._set_compute("stt", changes["stt_device"])
             if "vision_device" in changes:
