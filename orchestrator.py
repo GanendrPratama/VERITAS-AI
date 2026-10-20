@@ -328,7 +328,7 @@ class Orchestrator:
         stt_ = ("ok", self.config["stt_model"]) if lib("faster_whisper") else ("down", "faster-whisper not installed")
         return [
             {"name": n, "status": st, "detail": d}
-            for n, (st, d) in [("ESP32 sensor (HR/GSR)", esp), ("Camera / face", cam),
+            for n, (st, d) in [("ESP32 sensor (heart rate)", esp), ("Camera / face", cam),
                                ("Microphone", mic), ("Speech-to-text", stt_), ("LLM (Ollama)", llm_)]
         ]
 

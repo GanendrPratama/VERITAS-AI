@@ -1,5 +1,6 @@
 """BLE sensor service: heart rate (standard BLE Heart Rate Service) + GSR
-(custom notify characteristic) from the ESP32. See docs/veritas-ai-design.md
+(custom notify characteristic, optional -- used only if the device has it)
+from the ESP32. See docs/veritas-ai-design.md
 Section 7 for the exact `ble_*` UUIDs the firmware must implement -- that
 firmware isn't built yet (Open decision #8), so this can't be tested against
 real hardware from this machine; the pure baseline/delta math below can be
@@ -99,7 +100,10 @@ class SensorService:
                 self._client = client
                 self._connected.set()
                 await client.start_notify(self.hr_char_uuid, self._on_hr)
-                await client.start_notify(self.gsr_char_uuid, self._on_gsr)
+                # GSR is optional: the ESP32-C3 firmware only publishes heart rate. Subscribing
+                # to a characteristic the device doesn't have raises, which used to drop HR too.
+                if self.gsr_char_uuid and client.services.get_characteristic(self.gsr_char_uuid):
+                    await client.start_notify(self.gsr_char_uuid, self._on_gsr)
                 while client.is_connected:
                     await asyncio.sleep(0.5)
         except Exception as e:
@@ -113,8 +117,13 @@ class SensorService:
             await self._client.disconnect()
 
     def _on_hr(self, _handle, data):
-        # BLE Heart Rate Measurement, uint8 format: flags byte, then BPM.
-        self._record("hr", data[1])
+        # BLE Heart Rate Measurement: flags byte, then BPM as uint8 (flags bit 0 clear,
+        # what our firmware sends) or uint16 LE (bit 0 set, e.g. a third-party strap).
+        if len(data) < 2:
+            return
+        bpm = int.from_bytes(data[1:3], "little") if data[0] & 0x01 else data[1]
+        if bpm > 0:  # 0 means "no reading", not a heart rate
+            self._record("hr", bpm)
 
     def _on_gsr(self, _handle, data):
         self._record("gsr", int.from_bytes(data[:2], "little"))
@@ -155,6 +164,15 @@ def _selfcheck():
 
     # too few samples to baseline -> no entry at all
     assert baseline_from_window([(0, "hr", 60)]) == {}
+
+    # HR packet parsing: uint8 and uint16 formats, and junk/zero packets ignored
+    svc = SensorService.__new__(SensorService)
+    svc.samples, svc._lock = [], threading.Lock()
+    svc._on_hr(None, bytearray([0x00, 72]))
+    svc._on_hr(None, bytearray([0x01, 0x2C, 0x01]))  # uint16 LE = 300
+    svc._on_hr(None, bytearray([0x00, 0]))
+    svc._on_hr(None, bytearray([0x00]))
+    assert [v for _t, _ch, v in svc.samples] == [72, 300], svc.samples
 
     print("sensors.py self-check passed")
 
