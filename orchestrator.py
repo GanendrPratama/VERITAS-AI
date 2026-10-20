@@ -733,7 +733,8 @@ class Orchestrator:
         active["stop_recommended"] = stop
         active["stop_reason"] = reason
 
-    def generate_question(self):
+    def generate_question(self, claim_id=None):
+        """`claim_id`: the claim the operator chose to probe; None lets the Interviewer pick."""
         with self.lock:
             self._require_active()
             if self.active["phase"] != "interview":
@@ -747,17 +748,20 @@ class Orchestrator:
                 raise OrchestratorError(
                     f"stop condition met ({self.active['stop_reason']}) -- use Stop Interview", status=409
                 )
+            if claim_id is not None and claim_id not in self.active["ledger"]:
+                raise OrchestratorError(f"unknown claim {claim_id!r}", status=400)
             session = self._begin_slow("the next question")
             history = llm.trim_history(list(session["transcript"]), self.config["llm_context_turns"])
             prompt = llm.build_interviewer_prompt(
-                INTERVIEWER_TEMPLATE, session["report_text"], session["ledger"], history
+                INTERVIEWER_TEMPLATE, session["report_text"], session["ledger"], history, claim_id
             )
             valid_ids = set(session["ledger"].keys())
+            focus_state = session["ledger"][claim_id]["state"] if claim_id is not None else None
         try:  # self.lock is released for the LLM call, which can take many seconds
             try:
                 response = llm.call_agent(
                     self.config["ollama_host"], self.config["model"], prompt,
-                    validate=lambda d: llm.validate_interviewer_response(d, valid_ids),
+                    validate=lambda d: llm.validate_interviewer_response(d, valid_ids, claim_id, focus_state),
                     keep_alive=self.config["llm_keep_alive"], max_tokens=self.config["llm_max_tokens"],
                 )
             except Exception as e:
@@ -794,7 +798,6 @@ SIMPLE_ROUTES = {
     "/calibrate/start": Orchestrator.calibrate_start,
     "/calibrate/stop": Orchestrator.calibrate_stop,
     "/record/start": Orchestrator.record_start,
-    "/generate-question": Orchestrator.generate_question,
     "/stop-interview": Orchestrator.stop_interview,
 }
 
@@ -906,6 +909,17 @@ def make_handler(orch):
                         return
                     orch.set_camera(index)
                     self._send_json(200, orch.cameras())
+                    return
+
+                if self.path == "/generate-question":
+                    body = self._read_body().strip()
+                    try:
+                        claim_id = json.loads(body).get("claim_id") if body else None
+                    except (json.JSONDecodeError, AttributeError):
+                        self._send_json(400, {"error": 'expected {"claim_id": ...} or an empty body'})
+                        return
+                    orch.generate_question(claim_id)
+                    self._send_json(200, orch.get_state())
                     return
 
                 if self.path == "/record/stop":
