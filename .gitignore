@@ -4,3 +4,5 @@ __pycache__/
 logs/
 docs/veritas-ai-design.md
 VERITAS-AI_Dashboard_SlideFlow.html
+.vscode/c_cpp_properties.json
+*.zip
