@@ -37,7 +37,7 @@ def fake_call_agent(host, model, prompt, validate=None, keep_alive=None, max_tok
     if "AROUSAL:" in prompt:
         data = {"state": "consistent", "plausibility": "adequate", "reasoning": "matches report", "new_claim_text": None}
     else:
-        m = re.search(r"^(c\d+):", prompt, re.MULTILINE)
+        m = re.search(r"^FOCUS:\n(c\d+):", prompt, re.MULTILINE) or re.search(r"^(c\d+):", prompt, re.MULTILINE)
         data = {"type": "deepen", "claim_id": m.group(1) if m else None, "question": "Ceritakan lebih lanjut?"}
     if validate:
         validate(data)
@@ -156,6 +156,21 @@ def main():
 
             status, sessions = call(port, "GET", "/sessions")
             assert session_a_id not in {s["session_id"] for s in sessions}, "stopped session shouldn't be listed"
+
+            # The operator picks which claim the next question probes.
+            call(port, "POST", "/sessions", make_test_pdf())
+            status, state = call(port, "POST", "/claims", ["was at home at 10pm", "drove a red car"])
+            first_id, second_id = list(state["ledger"].keys())
+            call(port, "POST", "/calibrate/start")
+            call(port, "POST", "/calibrate/stop")
+            status, _ = call(port, "POST", "/generate-question", {"claim_id": "nope"})
+            assert status == 400, "an unknown claim should be refused"
+            status, _ = call(port, "POST", "/generate-question", b"not json")
+            assert status == 400
+            status, state = call(port, "POST", "/generate-question", {"claim_id": second_id})
+            assert status == 200 and state["current_claim_id"] == second_id, state
+            status, state = call(port, "POST", "/generate-question", {"claim_id": None})
+            assert status == 200 and state["current_claim_id"] == first_id, "no choice -> Interviewer picks"
 
             # No mic/STT: stop is refused (still recording), then a typed answer completes the turn.
             call(port, "POST", "/sessions", make_test_pdf())

@@ -276,6 +276,19 @@ def interview_live():
         st.caption(mic["error"] or mic["device"] or "microphone opening...")
 
 
+def claim_picker(state):
+    """The claim the next question should probe, or None to let the Interviewer pick."""
+    ledger = state["ledger"]
+    options = [None, *ledger.keys()]
+    if st.session_state.get("question_claim") not in options:  # e.g. after switching sessions
+        st.session_state.pop("question_claim", None)
+    return st.selectbox(
+        "Question about", options, key="question_claim",
+        format_func=lambda cid: "Let the interviewer choose" if cid is None
+        else f"{cid}: {ledger[cid]['text']} [{ledger[cid]['state']}]",
+    )
+
+
 def control_panel(state):
     if state["phase"] == "idle":
         claims_step(state)
@@ -306,8 +319,12 @@ def control_panel(state):
                 if st.button("Stop", key="stop_rec") and post("/record/stop", data=typed.encode("utf-8"), timeout=300) is not None:
                     set_text_area("typed_answer", "")
                     st.rerun()
+                claim_id = claim_picker(state)
+                body = json.dumps({"claim_id": claim_id})
+            else:
+                body = None
             # Rerun only on success -- a rerun would wipe the error post() just showed.
-            if st.button(label, type=kind) and post(path, timeout=SLOW_TIMEOUTS.get(path, 120)) is not None:
+            if st.button(label, type=kind) and post(path, data=body, timeout=SLOW_TIMEOUTS.get(path, 120)) is not None:
                 st.rerun()
 
     @st.fragment(run_every="1s")

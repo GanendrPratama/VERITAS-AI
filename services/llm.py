@@ -86,9 +86,17 @@ def build_analyst_prompt(template, report, claim_text, transcript_turns, answer,
     )
 
 
-def build_interviewer_prompt(template, report, ledger, transcript_turns):
+def render_focus(ledger, focus_claim_id):
+    if focus_claim_id is None:
+        return "(none -- pick the claim yourself)"
+    claim = ledger[focus_claim_id]
+    return f"{focus_claim_id}: {claim['text']} [{claim['state']}]"
+
+
+def build_interviewer_prompt(template, report, ledger, transcript_turns, focus_claim_id=None):
     return (
         template.replace("<<REPORT>>", report)
+        .replace("<<FOCUS>>", render_focus(ledger, focus_claim_id))
         .replace("<<LEDGER>>", render_ledger(ledger))
         .replace("<<TRANSCRIPT>>", render_transcript(transcript_turns))
     )
@@ -109,12 +117,22 @@ def validate_claims_response(data):
         raise ValueError("claims must be a list of strings")
 
 
-def validate_interviewer_response(data, valid_claim_ids):
+def validate_interviewer_response(data, valid_claim_ids, focus_claim_id=None, focus_state=None):
+    """`focus_claim_id`: the claim the operator chose to probe; the question must be about it."""
     if data.get("type") not in ("anomaly-probe", "deepen", "new-claim"):
         raise ValueError(f"bad type: {data.get('type')!r}")
     if not data.get("question"):
         raise ValueError("missing question")
     claim_id = data.get("claim_id")
+    if focus_claim_id is not None:
+        # A null id is the same model habit as below; the prompt named the claim, so tie it back.
+        # A different id means the model ignored FOCUS -- retry.
+        if claim_id is not None and claim_id != focus_claim_id:
+            raise ValueError(f"claim_id {claim_id!r} is not the chosen claim {focus_claim_id!r}")
+        data["claim_id"] = focus_claim_id
+        if data["type"] == "new-claim":
+            data["type"] = "anomaly-probe" if focus_state in ("contradicted", "evasive") else "deepen"
+        return
     if claim_id is None:
         # qwen2.5 often answers {"type": "deepen", "claim_id": null} (~half the time on a live
         # run); rejecting that killed the interview. A question tied to no claim is a new-claim.
@@ -172,5 +190,19 @@ if __name__ == "__main__":
         assert False, "should have raised"
     except ValueError:
         pass
+
+    focused = {"type": "new-claim", "claim_id": None, "question": "?"}
+    validate_interviewer_response(focused, {"c1", "c2"}, focus_claim_id="c2", focus_state="evasive")
+    assert focused["claim_id"] == "c2" and focused["type"] == "anomaly-probe", focused
+    try:
+        validate_interviewer_response({"type": "deepen", "claim_id": "c1", "question": "?"}, {"c1", "c2"},
+                                      focus_claim_id="c2")
+        assert False, "should have raised"
+    except ValueError:
+        pass
+
+    ledger = {"c1": {"text": "a", "state": "unverified"}, "c2": {"text": "b", "state": "evasive"}}
+    assert build_interviewer_prompt("F=<<FOCUS>>", "r", ledger, []) == "F=(none -- pick the claim yourself)"
+    assert build_interviewer_prompt("F=<<FOCUS>>", "r", ledger, [], "c2") == "F=c2: b [evasive]"
 
     print("llm.py self-check passed")
