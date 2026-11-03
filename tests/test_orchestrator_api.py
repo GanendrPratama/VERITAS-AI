@@ -172,6 +172,23 @@ def main():
             status, state = call(port, "POST", "/generate-question", {"claim_id": None})
             assert status == 200 and state["current_claim_id"] == first_id, "no choice -> Interviewer picks"
 
+            # The operator types their own question; it runs through the same answer/Analyst turn.
+            for bad in ({"question": "   "}, {"claim_id": first_id}, b"not json", {"question": "Q?", "claim_id": "nope"}):
+                status, _ = call(port, "POST", "/ask-question", bad)
+                assert status == 400, bad
+            typed_q = "Siapa yang bisa memastikan Anda di rumah?"
+            status, state = call(port, "POST", "/ask-question", {"question": f"  {typed_q} ", "claim_id": second_id})
+            assert status == 200 and state["current_question"] == typed_q and state["current_claim_id"] == second_id, state
+            count = state["question_count"]
+            call(port, "POST", "/record/start")
+            status, _ = call(port, "POST", "/ask-question", {"question": typed_q})
+            assert status == 409, "should refuse a typed question while recording"
+            status, state = call(port, "POST", "/record/stop")
+            assert status == 200 and state["transcript"][-1]["question"] == typed_q, state["transcript"]
+            assert state["ledger"][second_id]["state"] == "consistent" and state["current_question"] is None, state
+            status, state = call(port, "POST", "/ask-question", {"question": "Apa lagi?", "claim_id": None})
+            assert status == 200 and state["current_claim_id"] is None and state["question_count"] == count + 1, state
+
             # No mic/STT: stop is refused (still recording), then a typed answer completes the turn.
             call(port, "POST", "/sessions", make_test_pdf())
             call(port, "POST", "/claims", ["was at home at 10pm"])

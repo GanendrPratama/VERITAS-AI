@@ -289,6 +289,20 @@ def claim_picker(state):
     )
 
 
+def own_question(claim_id):
+    """The interviewer's own typed question, asked instead of a generated one. It is tied to
+    the claim chosen in "Question about" (none = no specific claim) and its answer goes through
+    the same Record/Stop analysis as a generated question."""
+    question = text_area("Or type your own question", "own_question")
+    if claim_id is None:
+        st.caption("No claim chosen in \"Question about\" -- your question won't be tied to a claim.")
+    if st.button("Ask My Question", key="ask_own"):
+        body = json.dumps({"question": question, "claim_id": claim_id})
+        if post("/ask-question", data=body.encode("utf-8")) is not None:
+            set_text_area("own_question", "")
+            st.rerun()
+
+
 def control_panel(state):
     if state["phase"] == "idle":
         claims_step(state)
@@ -326,6 +340,8 @@ def control_panel(state):
             # Rerun only on success -- a rerun would wipe the error post() just showed.
             if st.button(label, type=kind) and post(path, data=body, timeout=SLOW_TIMEOUTS.get(path, 120)) is not None:
                 st.rerun()
+            if label == "Generate Question":
+                own_question(claim_id)
 
     @st.fragment(run_every="1s")
     def live_state():

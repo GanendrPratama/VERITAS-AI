@@ -733,23 +733,43 @@ class Orchestrator:
         active["stop_recommended"] = stop
         active["stop_reason"] = reason
 
+    def _require_can_ask(self, claim_id):
+        """Call with self.lock held. The checks shared by generated and operator-typed questions."""
+        self._require_active()
+        if self.active["phase"] != "interview":
+            raise OrchestratorError(f"cannot ask a question during phase {self.active['phase']}")
+        if self.active["recording"]:
+            raise OrchestratorError("stop the current recording first")
+        if self.active["stop_recommended"]:
+            # Section 4: orchestrator is authority -- a stop condition already
+            # fired, so no further question is asked (Interviewer output
+            # would just be discarded anyway).
+            raise OrchestratorError(
+                f"stop condition met ({self.active['stop_reason']}) -- use Stop Interview", status=409
+            )
+        if claim_id is not None and claim_id not in self.active["ledger"]:
+            raise OrchestratorError(f"unknown claim {claim_id!r}", status=400)
+
+    def ask_question(self, question, claim_id=None):
+        """An operator-typed question becomes the current question, as if the Interviewer had
+        generated it: the next answer goes through the same Analyst/fusion/stoplogic turn.
+        `claim_id`: the claim it probes; None means no specific claim (the Analyst may then
+        add a new claim from the answer)."""
+        question = (question or "").strip()
+        if not question:
+            raise OrchestratorError("type a question first", status=400)
+        with self.lock:
+            self._require_can_ask(claim_id)
+            self._require_idle()
+            self.active["question_count"] += 1
+            self.active["current_question"] = question
+            self.active["current_claim_id"] = claim_id
+            self._save()
+
     def generate_question(self, claim_id=None):
         """`claim_id`: the claim the operator chose to probe; None lets the Interviewer pick."""
         with self.lock:
-            self._require_active()
-            if self.active["phase"] != "interview":
-                raise OrchestratorError(f"cannot generate a question during phase {self.active['phase']}")
-            if self.active["recording"]:
-                raise OrchestratorError("stop the current recording first")
-            if self.active["stop_recommended"]:
-                # Section 4: orchestrator is authority -- a stop condition already
-                # fired, so no further question is generated (Interviewer output
-                # would just be discarded anyway).
-                raise OrchestratorError(
-                    f"stop condition met ({self.active['stop_reason']}) -- use Stop Interview", status=409
-                )
-            if claim_id is not None and claim_id not in self.active["ledger"]:
-                raise OrchestratorError(f"unknown claim {claim_id!r}", status=400)
+            self._require_can_ask(claim_id)
             session = self._begin_slow("the next question")
             history = llm.trim_history(list(session["transcript"]), self.config["llm_context_turns"])
             prompt = llm.build_interviewer_prompt(
@@ -919,6 +939,18 @@ def make_handler(orch):
                         self._send_json(400, {"error": 'expected {"claim_id": ...} or an empty body'})
                         return
                     orch.generate_question(claim_id)
+                    self._send_json(200, orch.get_state())
+                    return
+
+                if self.path == "/ask-question":
+                    try:
+                        data = json.loads(self._read_body())
+                    except json.JSONDecodeError:
+                        data = None
+                    if not isinstance(data, dict) or not isinstance(data.get("question"), str):
+                        self._send_json(400, {"error": 'expected {"question": "...", "claim_id": ...}'})
+                        return
+                    orch.ask_question(data["question"], data.get("claim_id"))
                     self._send_json(200, orch.get_state())
                     return
 
