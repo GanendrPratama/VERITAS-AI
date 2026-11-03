@@ -10,8 +10,10 @@ Runs its own asyncio event loop in a background thread since bleak's API is
 async-only, so the rest of the orchestrator (plain sync code) just calls
 start()/stop()/calibrate()/delta_sd() -- same shape as services/vision.py.
 Any BLE failure (no device, disconnect, missing firmware) is swallowed: the
-channel just never gets samples, so delta_sd() reports it as unavailable
-rather than crashing the interview (Section 4).
+channel just has no samples meanwhile, so delta_sd() reports it as unavailable
+rather than crashing the interview (Section 4). The service keeps scanning and
+reconnecting (backoff 2s -> 15s) until stop(): an ESP32 that is switched on
+late, or drops out mid-interview, comes back by itself.
 """
 import asyncio
 import statistics
@@ -63,6 +65,7 @@ class SensorService:
         self._loop = None
         self._client = None
         self._connected = threading.Event()
+        self._stop = threading.Event()
         self._thread = None
         self.error = None  # last failure reason, shown in the UI status panel
 
@@ -71,7 +74,10 @@ class SensorService:
         # shouldn't stall on it -- the channel just has no samples until (and
         # unless) this connects. Check is_connected() if the UI wants status.
         if self._thread is not None and self._thread.is_alive():
-            return  # already scanning/connected (e.g. a session reopened mid-interview)
+            if not self._stop.is_set():
+                return  # already scanning/connected (e.g. a session reopened mid-interview)
+            self._thread.join(timeout=3)  # a stop() still winding down
+        self._stop.clear()
         self.error = None
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
@@ -80,6 +86,7 @@ class SensorService:
         return self._connected.is_set()
 
     def stop(self):
+        self._stop.set()  # ends the scan/reconnect loop
         # Only while the loop is alive -- after a failed scan it has already finished, and
         # scheduling onto it just leaks a never-awaited coroutine.
         if self._loop and self._loop.is_running():
@@ -91,26 +98,44 @@ class SensorService:
         self._loop.run_until_complete(self._connect_and_listen())
 
     async def _connect_and_listen(self):
+        delay = 2
+        while not self._stop.is_set():
+            if await self._connect_once():
+                delay = 2  # was connected: reconnect quickly after a drop
+            for _ in range(int(delay / 0.5)):
+                if self._stop.is_set():
+                    return
+                await asyncio.sleep(0.5)
+            delay = min(delay * 2, 15)
+
+    async def _connect_once(self):
+        """One scan + connection. Returns True if it connected at all."""
+        connected = False
         try:
             device = await BleakScanner.find_device_by_name(self.device_name, timeout=10)
             if device is None:
-                self.error = f"BLE scan (10s) found no device named {self.device_name!r}"
-                return
+                self.error = f"BLE scan (10s) found no device named {self.device_name!r} -- still retrying"
+                return False
             async with BleakClient(device) as client:
                 self._client = client
                 self._connected.set()
+                connected = True
+                self.error = None
                 await client.start_notify(self.hr_char_uuid, self._on_hr)
                 # GSR is optional: the ESP32-C3 firmware only publishes heart rate. Subscribing
                 # to a characteristic the device doesn't have raises, which used to drop HR too.
                 if self.gsr_char_uuid and client.services.get_characteristic(self.gsr_char_uuid):
                     await client.start_notify(self.gsr_char_uuid, self._on_gsr)
-                while client.is_connected:
+                while client.is_connected and not self._stop.is_set():
                     await asyncio.sleep(0.5)
+                if not self._stop.is_set():
+                    self.error = f"{self.device_name} disconnected -- reconnecting"
         except Exception as e:
-            self.error = f"{type(e).__name__}: {e}"  # degrade gracefully -- channel just stays unavailable
+            self.error = f"{type(e).__name__}: {e} -- retrying"  # degrade gracefully, try again
         finally:
             self._connected.clear()
             self._client = None
+        return connected
 
     async def _disconnect(self):
         if self._client:

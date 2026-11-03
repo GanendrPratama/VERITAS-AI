@@ -274,6 +274,20 @@ def interview_live():
             st.caption(t["error"])
         st.progress(mic["level"])
         st.caption(mic["error"] or mic["device"] or "microphone opening...")
+        timing = turn_timing(live.get("timings") or {})
+        if timing:
+            st.caption(timing)
+
+
+def turn_timing(timings):
+    """'Last turn: speech-to-text 1.2s · analysis 3.4s · question 0.0s (ready in advance)'."""
+    parts = []
+    for stage, label in (("stt", "speech-to-text"), ("analyst", "analysis"), ("question", "question")):
+        t = timings.get(stage)
+        if t and "total_ms" in t:
+            ms = t.get("waited_ms", t["total_ms"]) if t.get("prefetched") else t["total_ms"]
+            parts.append(f"{label} {ms / 1000:.1f}s" + (" (ready in advance)" if t.get("prefetched") else ""))
+    return "Last turn: " + " · ".join(parts) if parts else ""
 
 
 def claim_picker(state):

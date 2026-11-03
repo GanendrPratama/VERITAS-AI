@@ -112,6 +112,27 @@ def new_session_state(session_id, report_text):
     }
 
 
+class _Prefetch:
+    """The next auto-picked Interviewer question, generated in the background right after
+    an answer is assessed -- so "Generate Question" (default: let the interviewer choose)
+    is usually instant instead of waiting for the LLM."""
+
+    def __init__(self, key, run):
+        self.key = key
+        self.cancel = threading.Event()
+        self.done = threading.Event()
+        self.result, self.error, self.stats = None, None, {}
+        threading.Thread(target=self._go, args=(run,), daemon=True).start()
+
+    def _go(self, run):
+        try:
+            self.result = run(self.cancel, self.stats)
+        except Exception as e:  # llm.Cancelled included; generate_question then calls the model itself
+            self.error = e
+        finally:
+            self.done.set()
+
+
 class OrchestratorError(Exception):
     def __init__(self, message, status=409):
         super().__init__(message)
@@ -126,6 +147,9 @@ class Orchestrator:
         self.lock = threading.Lock()  # guards self.active; never held across an LLM or STT call
         self._busy = None  # the slow turn action (LLM/STT) running outside the lock, if any
         self._pending_answer = None  # (session_id, answer, unclear) kept when the Analyst fails, for a retry
+        self._prefetch = None  # _Prefetch of the next auto-picked question, if any
+        self._stt_vad = config.get("stt_vad", True)
+        self.timings = {}  # latest per-stage latency (ms), shown in the dashboard and logged
         self.sensors = _build_sensors()
         self.vision = _build_vision()
         self._camera_list = []
@@ -163,6 +187,7 @@ class Orchestrator:
             return
         state["recording"] = False  # the mic capture died with the old process
         self.active = state
+        self._warm_llm(state["report_text"])
         if state["phase"] != "idle":
             self.sensors.start()
             self.vision.start()
@@ -185,8 +210,9 @@ class Orchestrator:
         return f"c{n}"
 
     def _release_capture(self):
-        """Drop any in-progress mic capture and live captions (session ending or switching)."""
+        """Drop any in-progress mic capture, live captions and prefetched question (session ending or switching)."""
         self._caption_stop.set()
+        self._cancel_prefetch()
         if self.recorder.is_recording():
             self.recorder.cancel()
 
@@ -215,6 +241,42 @@ class Orchestrator:
             self._whisper_model = stt.load_model(self.config["stt_model"], device=self._stt_device)
         return self._whisper_model
 
+    def _llm_opts(self, report, max_tokens=None):
+        """Options shared by every agent call of a session. num_ctx is derived from the report
+        only, so it stays the same for all of the session's calls (a change reloads the model)."""
+        return {"keep_alive": self.config["llm_keep_alive"],
+                "max_tokens": max_tokens or self.config["llm_max_tokens"],
+                "num_ctx": self.config.get("llm_num_ctx") or llm.session_num_ctx(report)}
+
+    def _warm_llm(self, report):
+        """Load the model and cache the report prefix while the operator is still reading/clicking."""
+        if self.config.get("llm_warmup", True):
+            llm.warm_async(self.config["ollama_host"], self.config["model"], llm.report_prefix(report),
+                           keep_alive=self.config["llm_keep_alive"], num_ctx=self._llm_opts(report)["num_ctx"])
+
+    def _warm_whisper(self):
+        """Load Whisper in the background at calibration, not on the first answer's Stop."""
+        def load():
+            started = time.monotonic()
+            try:
+                with self._stt_lock:
+                    self._whisper()
+                self.stt_status.update(state="ready", device=self._stt_device)
+                self._note_timing("stt_load", {"total_ms": round((time.monotonic() - started) * 1000)})
+            except Exception as e:
+                print(f"[orchestrator] Whisper preload failed: {type(e).__name__}: {e}")
+                self.stt_status.update(state="idle")
+        threading.Thread(target=load, daemon=True).start()
+
+    def _note_timing(self, stage, stats):
+        self.timings[stage] = dict(stats, at=time.time())
+        print(f"[timing] {stage}: " + " ".join(f"{k}={v}" for k, v in stats.items()))
+
+    def _cancel_prefetch(self):
+        if self._prefetch is not None:
+            self._prefetch.cancel.set()
+            self._prefetch = None
+
     # -- session lifecycle --
 
     def create_session(self, pdf_bytes):
@@ -225,6 +287,7 @@ class Orchestrator:
                 raise OrchestratorError(f"couldn't read PDF: {e}", status=400)
             self._switch_session(new_session_state(self._new_session_id(), report_text))
             self._save()
+            self._warm_llm(report_text)
             return dict(self.active)
 
     def list_sessions(self):
@@ -252,6 +315,8 @@ class Orchestrator:
                 raise OrchestratorError(f"no such session: {session_id}", status=404)
             self._switch_session(json.loads(path.read_text()))
             self._remember_active()
+            if self.active["phase"] != "stopped":
+                self._warm_llm(self.active["report_text"])
             return dict(self.active)
 
     def delete_session(self, session_id):
@@ -381,6 +446,7 @@ class Orchestrator:
         return {
             "mic": {"level": r.level, "device": r.device_name, "error": r.error, "recording": r.is_recording()},
             "stt": dict(self.stt_status),
+            "timings": dict(self.timings),
             "sensors": latest(self.sensors),
             "vision": {"channels": latest(self.vision), "device": getattr(self.vision, "device_used", None),
                        "running": getattr(self.vision, "is_running", lambda: False)(),
@@ -436,13 +502,16 @@ class Orchestrator:
         with self.lock:
             self._require_active()
             report, existing = self.active["report_text"], {c["text"] for c in self.active["ledger"].values()}
+        stats = {}
         try:
             data = llm.call_agent(
-                self.config["ollama_host"], self.config["model"], CLAIMS_TEMPLATE.replace("<<REPORT>>", report),
-                validate=llm.validate_claims_response, keep_alive=self.config["llm_keep_alive"], max_tokens=768,
+                self.config["ollama_host"], self.config["model"], llm.build_claims_prompt(CLAIMS_TEMPLATE, report),
+                validate=llm.validate_claims_response, schema=llm.CLAIMS_SCHEMA, stats=stats,
+                **self._llm_opts(report, max_tokens=768),
             )
         except (llm.InvalidAgentJSON, OSError) as e:  # OSError covers requests' connection errors
             raise OrchestratorError(f"couldn't extract claims ({type(e).__name__}: {e}) -- is Ollama running?", status=502)
+        self._note_timing("claims", stats)
         return {"claims": [c.strip() for c in data["claims"] if c.strip() and c.strip() not in existing]}
 
     # -- microphones and compute devices --
@@ -517,6 +586,8 @@ class Orchestrator:
             if not getattr(self.vision, "is_running", lambda: True)():
                 self._pick_camera()  # don't calibrate on a camera index that won't open
             self.vision.start()
+            if self._whisper_model is None:
+                self._warm_whisper()
             self.active["phase"] = "calibration"
             self.active["calibration_start_ts"] = time.time()
             self._save()
@@ -533,6 +604,7 @@ class Orchestrator:
             self.active["phase"] = "interview"
             self.active["interview_start_ts"] = now
             self._save()
+            self._start_prefetch(self.active)  # the first question is ready by the time the operator asks
 
     def record_start(self):
         with self.lock:
@@ -543,6 +615,8 @@ class Orchestrator:
                 raise OrchestratorError("already recording")
             self._require_idle()
             self._pending_answer = None
+            if self.active["current_question"] is not None:
+                self._cancel_prefetch()  # answering this question; the prefetched one is stale after it
             try:
                 self.recorder.start()
                 self._start_captions()
@@ -609,6 +683,8 @@ class Orchestrator:
                 if assess:
                     self._apply_assessment(ctx, response, answer_text)
                 self._save()
+                if assess:
+                    self._start_prefetch(session)
         finally:
             self._busy = None
 
@@ -619,8 +695,18 @@ class Orchestrator:
             print(f"[orchestrator] mic recording unavailable: {e}")
             raise OrchestratorError("no audio captured (mic unavailable) -- type the answer and press Stop again")
         self.stt_status.update(state="transcribing", error=None)
+        started = time.monotonic()
         with self._stt_lock:
-            result = self._transcribe(str(wav_path))
+            options = {"vad_filter": True} if self._stt_vad else {}  # skip silence: faster, fewer hallucinations
+            try:
+                result = self._transcribe(str(wav_path), **options)
+            except OrchestratorError:
+                if not options:
+                    raise
+                print("[orchestrator] STT with VAD failed; retrying without it")
+                self._stt_vad = False
+                result = self._transcribe(str(wav_path))
+        self._note_timing("stt", {"total_ms": round((time.monotonic() - started) * 1000), "device": self._stt_device})
         self.stt_status.update(state="ready", last_text=result["text"], partial="")
         return result["text"], result["unclear"]
 
@@ -692,14 +778,17 @@ class Orchestrator:
             ANALYST_TEMPLATE, ctx["report_text"], ctx["claim_text"], ctx["history"], answer_text, ctx["arousal"],
             question=ctx["question"],
         )
+        stats = {}
         try:
-            return llm.call_agent(
+            response = llm.call_agent(
                 self.config["ollama_host"], self.config["model"], prompt,
-                validate=llm.validate_analyst_response,
-                keep_alive=self.config["llm_keep_alive"], max_tokens=self.config["llm_max_tokens"],
+                validate=llm.validate_analyst_response, schema=llm.ANALYST_SCHEMA, stats=stats,
+                **self._llm_opts(ctx["report_text"]),
             )
         except Exception as e:
             raise OrchestratorError(f"Analyst call failed: {e} -- press Stop again to retry", status=502)
+        self._note_timing("analyst", stats)
+        return response
 
     def _apply_assessment(self, ctx, response, answer_text):
         """Call with self.lock held."""
@@ -761,31 +850,71 @@ class Orchestrator:
         with self.lock:
             self._require_can_ask(claim_id)
             self._require_idle()
+            self._cancel_prefetch()
             self.active["question_count"] += 1
             self.active["current_question"] = question
             self.active["current_claim_id"] = claim_id
             self._save()
+
+    def _interviewer_job(self, session, claim_id):
+        """Call with self.lock held: a snapshot of everything one Interviewer call needs.
+        `key` identifies the session state it was built from, to match a prefetched question."""
+        history = llm.trim_history(list(session["transcript"]), self.config["llm_context_turns"])
+        valid_ids = set(session["ledger"].keys())
+        return {
+            "prompt": llm.build_interviewer_prompt(
+                INTERVIEWER_TEMPLATE, session["report_text"], session["ledger"], history, claim_id),
+            "report": session["report_text"],
+            "valid_ids": valid_ids,
+            "claim_id": claim_id,
+            "focus_state": session["ledger"][claim_id]["state"] if claim_id is not None else None,
+            "key": (session["session_id"], session["question_count"], len(session["transcript"]),
+                    json.dumps(session["ledger"], sort_keys=True), claim_id),
+        }
+
+    def _run_interviewer(self, job, cancel=None, stats=None):
+        return llm.call_agent(
+            self.config["ollama_host"], self.config["model"], job["prompt"],
+            validate=lambda d: llm.validate_interviewer_response(d, job["valid_ids"], job["claim_id"], job["focus_state"]),
+            schema=llm.interviewer_schema(job["valid_ids"], job["claim_id"]),
+            cancel=cancel, stats=stats, **self._llm_opts(job["report"]),
+        )
+
+    def _start_prefetch(self, session):
+        """Call with self.lock held. Start generating the next auto-picked question in the background."""
+        self._cancel_prefetch()
+        if (not self.config.get("llm_prefetch_question", True) or session["phase"] != "interview"
+                or session["stop_recommended"] or session["recording"]):
+            return
+        job = self._interviewer_job(session, None)
+        self._prefetch = _Prefetch(job["key"], lambda cancel, stats: self._run_interviewer(job, cancel, stats))
 
     def generate_question(self, claim_id=None):
         """`claim_id`: the claim the operator chose to probe; None lets the Interviewer pick."""
         with self.lock:
             self._require_can_ask(claim_id)
             session = self._begin_slow("the next question")
-            history = llm.trim_history(list(session["transcript"]), self.config["llm_context_turns"])
-            prompt = llm.build_interviewer_prompt(
-                INTERVIEWER_TEMPLATE, session["report_text"], session["ledger"], history, claim_id
-            )
-            valid_ids = set(session["ledger"].keys())
-            focus_state = session["ledger"][claim_id]["state"] if claim_id is not None else None
+            job = self._interviewer_job(session, claim_id)
+            prefetch, self._prefetch = self._prefetch, None
+            if prefetch is not None and prefetch.key != job["key"]:
+                prefetch.cancel.set()  # built for another claim choice or an older state: free the model
+                prefetch = None
         try:  # self.lock is released for the LLM call, which can take many seconds
-            try:
-                response = llm.call_agent(
-                    self.config["ollama_host"], self.config["model"], prompt,
-                    validate=lambda d: llm.validate_interviewer_response(d, valid_ids, claim_id, focus_state),
-                    keep_alive=self.config["llm_keep_alive"], max_tokens=self.config["llm_max_tokens"],
-                )
-            except Exception as e:
-                raise OrchestratorError(f"Interviewer call failed: {e}", status=502)
+            response, stats = None, {}
+            if prefetch is not None:
+                waited = time.monotonic()
+                if prefetch.done.wait(150) and prefetch.result is not None:
+                    response = prefetch.result
+                    stats = dict(prefetch.stats, prefetched=True,
+                                 waited_ms=round((time.monotonic() - waited) * 1000))
+                else:
+                    prefetch.cancel.set()
+            if response is None:
+                try:
+                    response = self._run_interviewer(job, stats=stats)
+                except Exception as e:
+                    raise OrchestratorError(f"Interviewer call failed: {e}", status=502)
+            self._note_timing("question", stats)
             with self.lock:
                 if not self._still_current(session):
                     raise OrchestratorError("the session changed while the question was generated -- question discarded")

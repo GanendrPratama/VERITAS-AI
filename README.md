@@ -190,3 +190,22 @@ python services/sensors.py
 python services/vision.py               # baseline/delta/micro-expression math only, no camera needed
 python services/docconvert.py           # PDF->Markdown, falls back to pypdf if markitdown is missing
 ```
+
+### Latency
+
+Each answer and question logs a `[timing]` line to `logs/orchestrator.log` (STT, Analyst,
+question, claims: total time, Ollama load time, prompt tokens actually evaluated, output
+tokens), and the interview screen shows the last turn's times under the speech-to-text box.
+
+- Every agent prompt starts with the same REPORT block, so Ollama's prompt cache evaluates
+  the report once per session; `prompt_tokens` in the timing line drops to the
+  turn-specific part after the first call.
+- The model is loaded and the report cached as soon as a session is opened
+  (`llm_warmup`), and Whisper loads when calibration starts, not on the first Stop.
+- After each assessed answer the next auto-picked question is generated in the
+  background (`llm_prefetch_question`); "Generate Question" with "Let the interviewer
+  choose" then returns at once. Choosing a claim or typing a question cancels it.
+- `num_ctx` is sized from the report (`llm_num_ctx = 0`) so long reports aren't cut off,
+  and stays fixed for the session (a change makes Ollama reload the model).
+- Agent output uses Ollama structured outputs (JSON schema), so an invalid state or a
+  claim id other than the chosen one can't be generated and no retry is needed for it.
