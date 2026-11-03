@@ -6,7 +6,7 @@ the transcript so far, and note whether it holds up. Physiological arousal is
 given as context, never as evidence of deception by itself.
 
 Given:
-- REPORT: the subject's written report.
+- REPORT: the subject's written report, given above.
 - CLAIM: the specific claim this answer is being checked against, or the text
   `(none -- identify a new claim)` if this was a new-claim probe.
 - TRANSCRIPT: prior question/answer turns in this interview.
@@ -34,9 +34,6 @@ Respond with ONLY this JSON, no other text:
 ```
 
 ---
-
-REPORT:
-<<REPORT>>
 
 CLAIM:
 <<CLAIM>>

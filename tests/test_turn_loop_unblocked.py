@@ -78,6 +78,8 @@ def main():
         pass
 
     with tempfile.TemporaryDirectory() as tmp:
+        # this test drives each LLM call by hand; the background question prefetch has its own test
+        orchestrator.CONFIG["llm_prefetch_question"] = False
         server, port = start_server(tmp)
         orchestrator.llm.call_agent = slow_call_agent
         try:

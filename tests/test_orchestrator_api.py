@@ -33,7 +33,7 @@ def make_test_pdf():
     return buf.getvalue()
 
 
-def fake_call_agent(host, model, prompt, validate=None, keep_alive=None, max_tokens=None):
+def fake_call_agent(host, model, prompt, validate=None, **_options):
     if "AROUSAL:" in prompt:
         data = {"state": "consistent", "plausibility": "adequate", "reasoning": "matches report", "new_claim_text": None}
     else:
